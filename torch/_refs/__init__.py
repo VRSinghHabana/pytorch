@@ -364,6 +364,7 @@ def handle_noncontiguous_outputs(input_tlist, output):
     return output
 
 
+
 def _broadcast_shapes(*_shapes):
     shapes = tuple(
         (x,) if isinstance(x, IntLike) else x
