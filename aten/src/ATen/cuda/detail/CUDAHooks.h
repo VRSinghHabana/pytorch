@@ -8,7 +8,7 @@
 // TODO: No need to have this whole header, we can just put it all in
 // the cpp file
 
-namespace at { namespace cuda { namespace detail {
+namespace at::cuda::detail {
 
 // Set the callback to initialize Magma, which is set by
 // torch_cuda_cu. This indirection is required so magma_init is called
@@ -27,6 +27,7 @@ struct CUDAHooks : public at::CUDAHooksInterface {
   bool hasMAGMA() const override;
   bool hasCuDNN() const override;
   bool hasCuSOLVER() const override;
+  bool hasCuBLASLt() const override;
   bool hasROCM() const override;
   const at::cuda::NVRTC& nvrtc() const override;
   DeviceIndex current_device() const override;
@@ -51,4 +52,4 @@ struct CUDAHooks : public at::CUDAHooksInterface {
   void deviceSynchronize(DeviceIndex device_index) const override;
 };
 
-}}} // at::cuda::detail
+} // at::cuda::detail

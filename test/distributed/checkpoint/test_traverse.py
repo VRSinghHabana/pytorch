@@ -1,6 +1,7 @@
 # Owner(s): ["oncall: distributed"]
 
 from collections import OrderedDict
+
 import torch
 
 import torch.distributed.checkpoint._traverse as _traverse
@@ -32,8 +33,10 @@ class TestTraverse(TestCase):
         self.assertIn(("key1",), data)
         self.assertEqual(data[("key1",)], [1, 2])
 
-        self.assertIn(("key2",), data)
-        self.assertEqual(data[("key2",)], {1: 2, 2: 3})
+        self.assertIn(("key2", "1"), data)
+        self.assertEqual(data[("key2", "1")], 2)
+        self.assertIn(("key2", "2"), data)
+        self.assertEqual(data[("key2", "2")], 3)
 
         self.assertIn(("key3",), data)
         self.assertEqual(data[("key3",)], torch.tensor([1]))
@@ -95,9 +98,7 @@ class TestTraverse(TestCase):
         self.assertEqual(data[("key0", "key2")], torch.tensor([1]))
 
     def test_traverse_doesnt_ignore_intermediate_collections(self) -> None:
-        state_dict: STATE_DICT_TYPE = {
-            "key0": [{"key1": {"key2": torch.tensor([1])}}]
-        }
+        state_dict: STATE_DICT_TYPE = {"key0": [{"key1": {"key2": torch.tensor([1])}}]}
 
         data = {}
 

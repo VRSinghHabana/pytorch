@@ -61,7 +61,7 @@ def _wait(batch: Batch, prev_stream: AbstractStream, next_stream: AbstractStream
 
 
 def _clock_cycles(m: int, n: int) -> Iterable[List[Tuple[int, int]]]:
-    """Generates schedules for each clock cycle."""
+    """Generate schedules for each clock cycle."""
     # m: number of micro-batches
     # n: number of partitions
     # i: index of micro-batch
@@ -119,9 +119,7 @@ class Pipeline:
     def fence(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
     ) -> None:
-        """Copies micro-batches after computation for the previous
-        micro-batches.
-        """
+        """Copy micro-batches after computation for the previous micro-batches."""
         copy_streams = self.copy_streams
         skip_layout = self.skip_layout
 
@@ -144,7 +142,7 @@ class Pipeline:
     def compute(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
     ) -> None:
-        """Runs tasks with synchronization to copy streams."""
+        """Run tasks with synchronization to copy streams."""
         partitions = self.partitions
         devices = self.devices
         copy_streams = self.copy_streams
@@ -159,30 +157,30 @@ class Pipeline:
         exc_info: Optional[ExcInfo] = None
 
         # With checkpointing, the autograd graph looks like this diagram:
-        # ┌─────┸──────┐
-        # │    Copy    │
-        # └─────┰──────┘   (fence)
-        # ─ ─ ─ ╂ ─ ─ ─ ─ ─ ─ ─ ─ ─
-        #       ┃          (compute)
-        # ┌─────┸──────┐
-        # │    Wait    │ [1] Synchronize the current stream with the copy stream.
-        # └─────┰──────┘
-        # ┌─────┸──────┐
-        # │ Checkpoint │ [2] Compute a partition within checkpointing.
-        # └─────┰──────┘
-        # ┌─────┸──────┐
-        # │    Wait    │ [3] Synchronize the copy stream with the current stream.
-        # └─────┰──────┘
-        #       ┠ ─ ─ ─ ┐
-        #       ┃ ┌─────┴─────┐
-        #       ┃ │ Recompute │ [4] Schedule the recomputation at backpropagation.
-        #       ┃ └─────┬─────┘
-        #       ┠ ─ ─ ─ ┘
-        #       ┃
-        # ─ ─ ─ ╂ ─ ─ ─ ─ ─ ─ ─ ─ ─
-        # ┌─────┸──────┐   (fence)
-        # │    Copy    │
-        # └─────┰──────┘
+        # +-----+------+
+        # |    Copy    |
+        # +-----+------+   (fence)
+        # - - - + - - - - - - - - -
+        #       |          (compute)
+        # +-----+------+
+        # |    Wait    | [1] Synchronize the current stream with the copy stream.
+        # +-----+------+
+        # +-----+------+
+        # | Checkpoint | [2] Compute a partition within checkpointing.
+        # +-----+------+
+        # +-----+------+
+        # |    Wait    | [3] Synchronize the copy stream with the current stream.
+        # +-----+------+
+        #       + - - - +
+        #       | +-----+-----+
+        #       | | Recompute | [4] Schedule the recomputation at backpropagation.
+        #       | +-----+-----+
+        #       + - - - +
+        #       |
+        # - - - + - - - - - - - - -
+        # +-----+------+   (fence)
+        # |    Copy    |
+        # +-----+------+
         for i, j in schedule:
             batch = batches[i]
             partition = partitions[j]

@@ -8,7 +8,6 @@
 
 #include <cstring>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,7 +26,9 @@
 #include <unistd.h>
 #endif
 
+C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wdeprecated")
 #include <fmt/chrono.h>
+C10_DIAGNOSTIC_POP()
 #include <fmt/format.h>
 
 #include <torch/csrc/distributed/c10d/error.h>
@@ -36,8 +37,7 @@
 
 #include <c10/util/CallOnce.h>
 
-namespace c10d {
-namespace detail {
+namespace c10d::detail {
 namespace {
 #ifdef _WIN32
 
@@ -181,8 +181,7 @@ class SocketImpl {
 
   Handle hnd_;
 };
-} // namespace detail
-} // namespace c10d
+} // namespace c10d::detail
 
 //
 // libfmt formatters for `addrinfo` and `Socket`
@@ -249,8 +248,7 @@ struct formatter<c10d::detail::SocketImpl> {
 
 } // namespace fmt
 
-namespace c10d {
-namespace detail {
+namespace c10d::detail {
 
 SocketImpl::~SocketImpl() {
 #ifdef _WIN32
@@ -404,11 +402,34 @@ bool SocketImpl::setSocketFlag(int level, int optname, bool value) noexcept {
 }
 
 bool SocketImpl::waitForInput(std::chrono::milliseconds timeout) {
-  ::pollfd pfd{};
-  pfd.fd = hnd_;
-  pfd.events = POLLIN;
+  using Clock = std::chrono::steady_clock;
 
-  return pollFd(&pfd, 1, static_cast<int>(timeout.count())) > 0;
+  auto deadline = Clock::now() + timeout;
+  do {
+    ::pollfd pfd{};
+    pfd.fd = hnd_;
+    pfd.events = POLLIN;
+
+    int res = pollFd(&pfd, 1, static_cast<int>(timeout.count()));
+    if (res > 0) {
+      return true;
+    }
+    std::error_code err = getSocketError();
+
+    if (err == std::errc::operation_in_progress) {
+      bool timedout = Clock::now() >= deadline;
+      if (timedout) {
+        return false;
+      }
+      C10D_WARNING(
+          "pollFB for socket {} returned operation_in_progress before a timeout",
+          hnd_);
+    } else if (err != std::errc::interrupted) {
+      C10D_WARNING("While waitForInput, poolFD failed with {}.", err);
+      return false;
+    }
+  } while (Clock::now() < deadline);
+  return false;
 }
 
 namespace {
@@ -433,6 +454,7 @@ class SocketListenOp {
   bool tryListen(const ::addrinfo& addr);
 
   template <typename... Args>
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
   void recordError(fmt::string_view format, Args&&... args) {
     auto msg = fmt::vformat(format, fmt::make_format_args(args...));
 
@@ -589,7 +611,9 @@ class SocketListenFromFdOp {
   std::unique_ptr<SocketImpl> run() const;
 
  private:
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
   const int fd_;
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
   const std::uint16_t expected_port_;
 };
 
@@ -599,7 +623,7 @@ SocketListenFromFdOp::SocketListenFromFdOp(int fd, std::uint16_t expected_port)
 std::unique_ptr<SocketImpl> SocketListenFromFdOp::run() const {
   C10D_DEBUG("listenFromFd: fd {}, expected port {}", fd_, expected_port_);
 
-  ::sockaddr_storage addr_storage;
+  ::sockaddr_storage addr_storage{};
   ::socklen_t addr_len = sizeof(addr_storage);
   if (::getsockname(
           fd_, reinterpret_cast<::sockaddr*>(&addr_storage), &addr_len) < 0) {
@@ -646,7 +670,7 @@ class SocketConnectOp {
 
   static const std::chrono::seconds delay_duration_;
 
-  enum class ConnectResult { Success, Error, Retry };
+  enum class ConnectResult : uint8_t { Success, Error, Retry };
 
  public:
   SocketConnectOp(
@@ -666,6 +690,7 @@ class SocketConnectOp {
   [[noreturn]] void throwTimeoutError() const;
 
   template <typename... Args>
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
   void recordError(fmt::string_view format, Args&&... args) {
     auto msg = fmt::vformat(format, fmt::make_format_args(args...));
 
@@ -1008,6 +1033,4 @@ bool Socket::waitForInput(std::chrono::milliseconds timeout) {
   return impl_->waitForInput(timeout);
 }
 
-} // namespace detail
-
-} // namespace c10d
+} // namespace c10d::detail

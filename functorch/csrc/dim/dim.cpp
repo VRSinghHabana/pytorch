@@ -10,7 +10,13 @@
 // Many APIs have changed/don't exist anymore
 #if IS_PYTHON_3_12_PLUS
 
+#include "dim.h"
+
 // Re-enable this some day
+PyObject* Dim_init() {
+    PyErr_SetString(PyExc_RuntimeError, "First class dim doesn't work with python 3.12");
+    return nullptr;
+}
 
 #else
 
@@ -103,10 +109,10 @@ void initializeGlobals(Arena & A) {
     torch_Tensor = (PyTypeObject*) torch.attr("Tensor").ptr();
     torch_Tensor___mul__ = torch.attr("Tensor").attr("__mul__");
 
-    torch_Tensor_expand = torch.attr("_C").attr("_TensorBase").attr("expand");
-    torch_Tensor_split = torch.attr("_C").attr("_TensorBase").attr("split");
+    torch_Tensor_expand = torch.attr("_C").attr("TensorBase").attr("expand");
+    torch_Tensor_split = torch.attr("_C").attr("TensorBase").attr("split");
     torch_Tensor_copy_ = torch.attr("Tensor").attr("copy_");
-    auto py_TensorBase = torch.attr("_C").attr("_TensorBase");
+    auto py_TensorBase = torch.attr("_C").attr("TensorBase");
     auto TensorBase = (PyTypeObject*) py_TensorBase.ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
     THPVariable_setitem = TensorBase->tp_as_mapping->mp_ass_subscript;
@@ -1117,8 +1123,8 @@ int64_t _Tensor_ndim(mpy::handle h) {
 
 mpy::handle handle_from_tensor(Arena& A, TensorRef t) {
     // fast case: tensor is live in python
-    c10::optional<PyObject*> mb_obj =
-        t->unsafeGetTensorImpl()->pyobj_slot()->check_pyobj(getPyInterpreter());
+    std::optional<PyObject*> mb_obj =
+        t->unsafeGetTensorImpl()->pyobj_slot()->check_pyobj(getPyInterpreter(), /*ignore_hermetic_tls=*/false);
     if (mb_obj.has_value() && !t->unsafeGetTensorImpl()->pyobj_slot()->owns_pyobj()) {
         return *mb_obj;
     }
@@ -1512,14 +1518,14 @@ struct PyInstDecoder {
     // On Windows, _PyOpcode_Caches and _PyOpcode_Deopt are private symbols
     // See https://github.com/pytorch/pytorch/issues/93854
     void next() {
-    #if IS_PYTHON_3_11_PLUS && !defined(_WIN32)
+    #if IS_PYTHON_3_11_PLUS
         offset_ += _PyOpcode_Caches[opcode()];
     #endif
         offset_ += 1;
     }
     int opcode() {
         auto r = _Py_OPCODE(code_[offset_]);
-    #if IS_PYTHON_3_11_PLUS && !defined(_WIN32)
+    #if IS_PYTHON_3_11_PLUS
         r = _PyOpcode_Deopt[r];
     #endif
         return r;
@@ -3188,7 +3194,7 @@ PyObject* _patch_tensor_class(PyObject * self_,
     PY_BEGIN
 
     auto torch = mpy::import("torch");
-    auto py_TensorBase = torch.attr("_C").attr("_TensorBase");
+    auto py_TensorBase = torch.attr("_C").attr("TensorBase");
     replaceMappingIfMatches(py_TensorBase);
 
     Py_RETURN_NONE;

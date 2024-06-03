@@ -36,7 +36,11 @@ def version():
     major = ver >> 32
     minor = (ver >> 16) & 65535
     patch = ver & 65535
-    return (major, minor, patch)
+    suffix = torch._C._nccl_version_suffix().decode("utf-8")
+    if suffix == "":
+        return (major, minor, patch)
+    else:
+        return (major, minor, patch, suffix)
 
 
 def unique_id():
@@ -85,8 +89,10 @@ def reduce(
             )
         else:
             warnings.warn(
-                "nccl.reduce with an output tensor list is deprecated. "
-                "Please specify a single output tensor with argument 'output' instead instead."
+                "`nccl.reduce` with an output tensor list is deprecated. "
+                "Please specify a single output tensor with argument 'output' instead instead.",
+                FutureWarning,
+                stacklevel=2,
             )
             _output = outputs[root]
     elif not isinstance(output, torch.Tensor) and isinstance(
@@ -95,7 +101,9 @@ def reduce(
         # User called old API with positional arguments of list of output tensors.
         warnings.warn(
             "nccl.reduce with an output tensor list is deprecated. "
-            "Please specify a single output tensor."
+            "Please specify a single output tensor.",
+            FutureWarning,
+            stacklevel=2,
         )
         _output = output[root]
     else:

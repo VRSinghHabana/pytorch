@@ -17,6 +17,7 @@ enum class C10_API_ENUM ActivityType {
   XPU, // XPU kernels, runtime
   CUDA, // CUDA kernels, runtime
   MTIA, // MTIA kernels, runtime
+  PrivateUse1, // PrivateUse1 kernels, runtime
   NUM_KINETO_ACTIVITIES, // must be the last one
 };
 
@@ -26,6 +27,7 @@ enum class C10_API_ENUM ProfilerState {
   CUDA, // CPU + CUDA events
   NVTX, // only emit NVTX markers
   ITT, // only emit ITT markers
+  PRIVATEUSE1, // only emit PRIVATEUSE1 markers
   KINETO, // use libkineto
   KINETO_GPU_FALLBACK, // use CUDA events when CUPTI is not available
   KINETO_PRIVATEUSE1_FALLBACK, // use PrivateUse1 events
@@ -38,7 +40,8 @@ enum class C10_API_ENUM ActiveProfilerType {
   LEGACY,
   KINETO,
   NVTX,
-  ITT
+  ITT,
+  PRIVATEUSE1
 };
 
 struct TORCH_API ExperimentalConfig {
@@ -49,7 +52,6 @@ struct TORCH_API ExperimentalConfig {
       std::vector<std::string> performance_events = {},
       bool enable_cuda_sync_events = false,
       bool adjust_timestamps = false);
-  ~ExperimentalConfig() = default;
   explicit operator bool() const;
 
   std::vector<std::string> profiler_metrics;
@@ -74,7 +76,7 @@ struct TORCH_API ExperimentalConfig {
    * their child events) and delaying CPU event start times (to
    * prevent overlaps), so this should not be used unless Vulkan events are
    * being profiled and it is ok to use this modified timestamp/duration
-   * information instead of the the original information.
+   * information instead of the original information.
    */
   bool adjust_timestamps;
 };
@@ -88,7 +90,6 @@ struct TORCH_API ProfilerConfig {
       bool with_flops = false,
       bool with_modules = false,
       ExperimentalConfig experimental_config = ExperimentalConfig());
-  ~ProfilerConfig() = default;
 
   bool disabled() const;
   bool global() const;
@@ -110,7 +111,7 @@ struct TORCH_API ProfilerConfig {
 // -- Profiler base class -----------------------------------------------------
 // ----------------------------------------------------------------------------
 struct TORCH_API ProfilerStateBase : public c10::MemoryReportingInfoBase {
-  explicit ProfilerStateBase(const ProfilerConfig& config);
+  explicit ProfilerStateBase(ProfilerConfig config);
   ~ProfilerStateBase() override;
 
   static ProfilerStateBase* get(bool global);

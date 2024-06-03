@@ -14,35 +14,31 @@
 
 using at::TypeKind;
 using c10::Argument;
-using c10::either;
 using c10::FunctionSchema;
 using c10::IValue;
 using c10::ListType;
-using c10::make_left;
-using c10::make_right;
 using c10::OperatorName;
-using c10::OptionalType;
 
 namespace torch::jit {
 
 namespace {
 struct SchemaParser {
-  explicit SchemaParser(const std::string& str)
+  explicit SchemaParser(const std::string& str, bool allow_typevars)
       : L(std::make_shared<Source>(
             c10::string_view(str),
             c10::nullopt,
             0,
             nullptr,
             Source::DONT_COPY)),
-        type_parser(L, /*parse_complete_tensor_types*/ false) {}
+        type_parser(L, /*parse_complete_tensor_types*/ false, allow_typevars) {}
 
-  either<OperatorName, FunctionSchema> parseDeclaration() {
+  std::variant<OperatorName, FunctionSchema> parseDeclaration() {
     OperatorName name = parseName();
 
     // If there is no parentheses coming, then this is just the operator name
     // without an argument list
     if (L.cur().kind != '(') {
-      return make_left<OperatorName, FunctionSchema>(std::move(name));
+      return OperatorName(std::move(name));
     }
 
     std::vector<Argument> arguments;
@@ -97,7 +93,7 @@ struct SchemaParser {
           parseArgument(0, /*is_return=*/true, /*kwarg_only=*/false));
     }
 
-    return make_right<OperatorName, FunctionSchema>(
+    return FunctionSchema(
         std::move(name.name),
         std::move(name.overload_name),
         std::move(arguments),
@@ -130,16 +126,16 @@ struct SchemaParser {
     return {name, overload_name};
   }
 
-  std::vector<either<OperatorName, FunctionSchema>> parseDeclarations() {
-    std::vector<either<OperatorName, FunctionSchema>> results;
+  std::vector<std::variant<OperatorName, FunctionSchema>> parseDeclarations() {
+    std::vector<std::variant<OperatorName, FunctionSchema>> results;
     do {
-      results.push_back(parseDeclaration());
+      results.emplace_back(parseDeclaration());
     } while (L.nextIf(TK_NEWLINE));
     L.expect(TK_EOF);
     return results;
   }
 
-  either<OperatorName, FunctionSchema> parseExactlyOneDeclaration() {
+  std::variant<OperatorName, FunctionSchema> parseExactlyOneDeclaration() {
     auto result = parseDeclaration();
     L.nextIf(TK_NEWLINE);
     L.expect(TK_EOF);
@@ -153,9 +149,9 @@ struct SchemaParser {
     auto fake_type = std::move(std::get<0>(p));
     auto real_type = std::move(std::get<1>(p));
     auto alias_info = std::move(std::get<2>(p));
-    c10::optional<int32_t> N;
-    c10::optional<IValue> default_value;
-    c10::optional<std::string> alias_set;
+    std::optional<int32_t> N;
+    std::optional<IValue> default_value;
+    std::optional<std::string> alias_set;
     std::string name;
     if (L.nextIf('[')) {
       // note: an array with a size hint can only occur at the Argument level
@@ -166,7 +162,7 @@ struct SchemaParser {
       auto container = type_parser.parseAliasAnnotation();
       if (alias_info) {
         if (!container) {
-          container = c10::optional<at::AliasInfo>(at::AliasInfo());
+          container = std::optional<at::AliasInfo>(at::AliasInfo());
           container->setIsWrite(alias_info->isWrite());
         }
         container->addContainedType(std::move(*alias_info));
@@ -301,7 +297,7 @@ struct SchemaParser {
   IValue parseDefaultValue(
       const c10::Type& arg_type,
       TypeKind kind,
-      c10::optional<int32_t> arg_N) {
+      std::optional<int32_t> arg_N) {
     auto range = L.cur().range;
     switch (kind) {
       case TypeKind::TensorType:
@@ -365,28 +361,36 @@ struct SchemaParser {
   }
   Lexer L;
   SchemaTypeParser type_parser;
+  bool allow_typevars_;
 };
 } // namespace
 
-either<OperatorName, FunctionSchema> parseSchemaOrName(
-    const std::string& schemaOrName) {
-  return SchemaParser(schemaOrName).parseExactlyOneDeclaration();
+std::variant<OperatorName, FunctionSchema> parseSchemaOrName(
+    const std::string& schemaOrName,
+    bool allow_typevars) {
+  // We're ignoring aten and prim for BC reasons
+  if (schemaOrName.rfind("aten::", 0) == 0 ||
+      schemaOrName.rfind("prim::", 0) == 0) {
+    allow_typevars = true;
+  }
+  return SchemaParser(schemaOrName, allow_typevars)
+      .parseExactlyOneDeclaration();
 }
 
-FunctionSchema parseSchema(const std::string& schema) {
-  auto parsed = parseSchemaOrName(schema);
+FunctionSchema parseSchema(const std::string& schema, bool allow_typevars) {
+  auto parsed = parseSchemaOrName(schema, allow_typevars);
   TORCH_CHECK(
-      parsed.is_right(),
+      std::holds_alternative<FunctionSchema>(parsed),
       "Tried to parse a function schema but only the operator name was given");
-  return std::move(parsed.right());
+  return std::get<FunctionSchema>(std::move(parsed));
 }
 
 OperatorName parseName(const std::string& name) {
   auto parsed = parseSchemaOrName(name);
   TORCH_CHECK(
-      parsed.is_left(),
+      std::holds_alternative<OperatorName>(parsed),
       "Tried to parse an operator name but function schema was given");
-  return std::move(parsed.left());
+  return std::get<OperatorName>(std::move(parsed));
 }
 
 } // namespace torch::jit

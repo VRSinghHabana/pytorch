@@ -22,7 +22,7 @@
 #include <ATen/ops/type_as_native.h>
 #endif
 
-namespace at { namespace native {
+namespace at::native {
 
 static bool is_cuda(const Tensor& self) {
   return self.is_cuda();
@@ -191,8 +191,8 @@ ScalarType result_type(const Scalar& scalar1, const Scalar& scalar2) {
   return result_type(state);
 }
 
-bool can_cast(const at::ScalarType from, const at::ScalarType to) {
-  return at::canCast(from, to);
+bool can_cast(const at::ScalarType from_, const at::ScalarType to) {
+  return at::canCast(from_, to);
 }
 
 ScalarType promote_types(ScalarType type1, ScalarType type2) {
@@ -201,4 +201,4 @@ ScalarType promote_types(ScalarType type1, ScalarType type2) {
   return ret;
 }
 
-}} // namespace at::native
+} // namespace at::native

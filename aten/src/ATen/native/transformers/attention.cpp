@@ -1,31 +1,68 @@
-#include <type_traits>
-#include <limits>
-#include <c10/core/DeviceType.h>
-#include <ATen/ATen.h>
+#include <ATen/core/TensorBody.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/TensorOperators.h>
 #include <ATen/AccumulateType.h>
 #include <ATen/Dispatch.h>
 #include <ATen/OpMathType.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/NestedTensorImpl.h>
-#include <ATen/Parallel.h>
 #include <ATen/TensorIndexing.h>
-#include <ATen/cpu/vec/vec256/vec256.h>
+#include <ATen/TensorSubclassLikeUtils.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/native/transformers/sdp_utils_cpp.h>
-#include <utility>
 #include <c10/util/typeid.h>
+#include <c10/core/DeviceType.h>
 #include <c10/core/SymInt.h>
 #include <c10/core/SymIntArrayRef.h>
 #include <c10/util/Logging.h>
-#include <c10/util/Exception.h>
 #include <c10/core/DispatchKey.h>
 #include <c10/core/DispatchKeySet.h>
-#include <ATen/TensorSubclassLikeUtils.h>
+
+#include <type_traits>
+#include <limits>
+#include <utility>
 
 #ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 #else
+#include <ATen/ops/_fused_sdp_choice_native.h>
+#include <ATen/ops/_masked_softmax.h>
+#include <ATen/ops/_native_multi_head_attention_native.h>
+#include <ATen/ops/_nested_from_padded.h>
+#include <ATen/ops/_nested_tensor_softmax_with_shape.h>
+#include <ATen/ops/_scaled_dot_product_attention_math.h>
+#include <ATen/ops/_scaled_dot_product_attention_math_native.h>
+#include <ATen/ops/_scaled_dot_product_efficient_attention.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_backward_native.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_native.h>
+#include <ATen/ops/_scaled_dot_product_cudnn_attention.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_for_cpu.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_for_cpu_native.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_for_cpu_backward.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_for_cpu_backward_native.h>
+#include <ATen/ops/_softmax.h>
+#include <ATen/ops/_transform_bias_rescale_qkv.h>
+#include <ATen/ops/_transform_bias_rescale_qkv_native.h>
+#include <ATen/ops/_triton_multi_head_attention_native.h>
+#include <ATen/ops/_triton_scaled_dot_attention.h>
+#include <ATen/ops/bmm.h>
 #include <ATen/ops/cat.h>
+#include <ATen/ops/chunk_native.h>
+#include <ATen/ops/dropout.h>
+#include <ATen/ops/linear_native.h>
+#include <ATen/ops/matmul.h>
+#include <ATen/ops/matmul_native.h>
+#include <ATen/ops/ones.h>
+#include <ATen/ops/pad.h>
+#include <ATen/ops/scaled_dot_product_attention_native.h>
+#include <ATen/ops/softmax.h>
+#include <ATen/ops/split_native.h>
+#include <ATen/ops/split_with_sizes_native.h>
+#include <ATen/ops/zeros.h>
+#include <ATen/ops/zeros_like.h>
 #endif
 
 #include <ATen/native/nested/NestedTensorTransformerFunctions.h>
@@ -35,6 +72,7 @@ namespace native {
 
 DEFINE_DISPATCH(_fused_sdp_choice_stub);
 
+DEFINE_DISPATCH(transform_bias_rescale_qkv_stub);
 DEFINE_DISPATCH(flash_attention_kernel);
 DEFINE_DISPATCH(flash_attention_backward_kernel);
 
@@ -45,83 +83,6 @@ Tensor gemm_nt(const Tensor& self, const Tensor& other) {
     return NestedTensor_matmul(self, other.t());
   } else {
     return at::native::matmul(self, other.t());
-  }
-}
-
-template <typename scalar_t>
-void transform_bias_rescale_qkv_inner_loop(
-    int64_t B,
-    int64_t T,
-    int64_t _3D,
-    int64_t D,
-    int64_t num_head,
-    int64_t dim_per_head,
-    scalar_t* qkv_data,
-    scalar_t* qkv_bias_data,
-    scalar_t* q_k_v_data,
-    scalar_t inv_sqrt_dim_per_head,
-    int64_t begin,
-    int64_t end) {
-  for (auto i : c10::irange(begin, end)) {
-    auto t = i % T;
-    i /= T;
-    auto nh = i % num_head;
-    i /= num_head;
-    auto b = i;
-    using Vec = vec::Vectorized<scalar_t>;
-    auto V = vec::Vectorized<scalar_t>::size();
-    auto dh = 0;
-    auto d = nh * dim_per_head;
-    for (; dh + V <= dim_per_head; dh += V, d += V) {
-      // load
-      auto q_bias_data = Vec::loadu(&qkv_bias_data[d + 0 * D]);
-      auto k_bias_data = Vec::loadu(&qkv_bias_data[d + 1 * D]);
-      auto v_bias_data = Vec::loadu(&qkv_bias_data[d + 2 * D]);
-
-      auto q_data = Vec::loadu(&qkv_data[b * _3D * T + t * _3D + d + 0 * D]) +
-          q_bias_data;
-      auto k_data = Vec::loadu(&qkv_data[b * _3D * T + t * _3D + d + 1 * D]) +
-          k_bias_data;
-      auto v_data = Vec::loadu(&qkv_data[b * _3D * T + t * _3D + d + 2 * D]) +
-          v_bias_data;
-
-      q_data = q_data * Vec(inv_sqrt_dim_per_head);
-
-      q_data.store(&q_k_v_data
-                       [0 * B * num_head * T * dim_per_head +
-                        b * num_head * T * dim_per_head +
-                        nh * T * dim_per_head + t * dim_per_head + dh]);
-      k_data.store(&q_k_v_data
-                       [1 * B * num_head * T * dim_per_head +
-                        b * num_head * T * dim_per_head +
-                        nh * T * dim_per_head + t * dim_per_head + dh]);
-      v_data.store(&q_k_v_data
-                       [2 * B * num_head * T * dim_per_head +
-                        b * num_head * T * dim_per_head +
-                        nh * T * dim_per_head + t * dim_per_head + dh]);
-    }
-    for (; dh < dim_per_head; dh++) {
-      auto d = nh * dim_per_head + dh;
-      auto q_bias = qkv_bias_data[d + 0 * D];
-      auto k_bias = qkv_bias_data[d + 1 * D];
-      auto v_bias = qkv_bias_data[d + 2 * D];
-      auto q_data = qkv_data[b * _3D * T + t * _3D + d + 0 * D] + q_bias;
-      auto k_data = qkv_data[b * _3D * T + t * _3D + d + 1 * D] + k_bias;
-      auto v_data = qkv_data[b * _3D * T + t * _3D + d + 2 * D] + v_bias;
-      q_data = q_data * inv_sqrt_dim_per_head;
-      q_k_v_data
-          [0 * B * num_head * T * dim_per_head +
-           b * num_head * T * dim_per_head + nh * T * dim_per_head +
-           t * dim_per_head + dh] = q_data;
-      q_k_v_data
-          [1 * B * num_head * T * dim_per_head +
-           b * num_head * T * dim_per_head + nh * T * dim_per_head +
-           t * dim_per_head + dh] = k_data;
-      q_k_v_data
-          [2 * B * num_head * T * dim_per_head +
-           b * num_head * T * dim_per_head + nh * T * dim_per_head +
-           t * dim_per_head + dh] = v_data;
-    }
   }
 }
 
@@ -146,9 +107,9 @@ Tensor bmm_nt(const Tensor& a, const Tensor& b) {
 
 Tensor masked_softmax(
     Tensor& attn_scores,
-    c10::optional<Tensor> attn_mask,
+    std::optional<Tensor> attn_mask,
     const Tensor& query,
-    c10::optional<int64_t> mask_type) {
+    std::optional<int64_t> mask_type) {
   if (query.is_nested() && !attn_mask) {
     return at::_nested_tensor_softmax_with_shape(attn_scores, query);
   }
@@ -284,37 +245,13 @@ std::tuple<Tensor, Tensor, Tensor> transform_bias_rescale_qkv_cpu(
 
   const auto qkv_contig = qkv_->expect_contiguous();
   const auto qkv_bias_contig = qkv_bias.expect_contiguous();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      ScalarType::Half,
-      ScalarType::BFloat16,
+  transform_bias_rescale_qkv_stub(
+      kCPU,
       qkv_->scalar_type(),
-      "transform_bias_rescale_qkv",
-      [&] {
-        scalar_t* qkv_data = qkv_contig->data_ptr<scalar_t>();
-        scalar_t* qkv_bias_data = qkv_bias_contig->data_ptr<scalar_t>();
-        scalar_t* q_k_v_data = q_k_v.data_ptr<scalar_t>();
-        const scalar_t inv_sqrt_dim_per_head =
-            1.0 / std::sqrt(static_cast<scalar_t>(dim_per_head));
-
-        int64_t grain_size =
-            std::max(internal::GRAIN_SIZE / (3 * dim_per_head), (int64_t)1);
-        parallel_for(
-            0, B * num_head * T, grain_size, [&](int64_t begin, int64_t end) {
-              transform_bias_rescale_qkv_inner_loop(
-                  B,
-                  T,
-                  _3D,
-                  D,
-                  num_head,
-                  dim_per_head,
-                  qkv_data,
-                  qkv_bias_data,
-                  q_k_v_data,
-                  inv_sqrt_dim_per_head,
-                  begin,
-                  end);
-            });
-      });
+      q_k_v.data_ptr(),
+      qkv_contig->const_data_ptr(),
+      qkv_bias_contig->const_data_ptr(),
+      B, T, D, num_head);
   auto q_k_v_s =
       at::native::split(q_k_v.view({3 * B, num_head, T, dim_per_head}), B, 0);
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(q_k_v_s.size() == 3);
@@ -331,10 +268,10 @@ std::tuple<Tensor, Tensor> native_multi_head_attention_cpu(
     const Tensor& qkv_bias,
     const Tensor& proj_weight,
     const Tensor& proj_bias,
-    const c10::optional<Tensor>& mask,
+    const std::optional<Tensor>& mask,
     bool need_weights,
     bool average_attn_weights,
-    const c10::optional<int64_t> mask_type) {
+    const std::optional<int64_t> mask_type) {
   // query shape: [B, T, D]
   // qkv_weight shape: [3 * D, D]
 
@@ -487,7 +424,7 @@ std::tuple<Tensor, Tensor> native_multi_head_attention_cpu(
 }
 
 int64_t _fused_sdp_choice_cpp(const Tensor& query_, const Tensor& key, const Tensor& value,
-        const c10::optional<Tensor>& attn_mask_, double dropout_p, bool is_causal, c10::optional<double> scale){
+        const std::optional<Tensor>& attn_mask_, double dropout_p, bool is_causal, std::optional<double> scale){
   sdp::sdp_params kernel_params{query_, key, value, attn_mask_, dropout_p, is_causal};
   auto backend = sdp::select_sdp_backend_cpp(kernel_params);
   if (backend == sdp::SDPBackend::error) {
@@ -509,11 +446,18 @@ int64_t _fused_sdp_choice_meta(
     const Tensor& query_,
     const Tensor& key,
     const Tensor& value,
-    const c10::optional<Tensor>& attn_mask_,
+    const std::optional<Tensor>& attn_mask_,
     double dropout_p,
     bool is_causal,
-    c10::optional<double> scale) {
+    std::optional<double> scale) {
   auto query_key_set = query_.key_set();
+#if defined(USE_ROCM)
+  bool has_rocm = query_key_set.has(c10::DispatchKey::HIP);
+  if (has_rocm) {
+    auto choice_int = _fused_sdp_choice_stub(at::kHIP, query_, key, value, attn_mask_, dropout_p, is_causal, scale);
+    return choice_int;
+  }
+#else
   bool has_cuda = query_key_set.has(c10::DispatchKey::CUDA);
   if (has_cuda) {
     auto choice_int = _fused_sdp_choice_stub(
@@ -527,6 +471,7 @@ int64_t _fused_sdp_choice_meta(
         scale);
     return choice_int;
   }
+#endif
   return static_cast<int64_t>(sdp::SDPBackend::math);
 }
 namespace {
@@ -535,10 +480,10 @@ inline void validate_sdpa_input(
     const Tensor& query_,
     const Tensor& key,
     const Tensor& value,
-    const c10::optional<Tensor>& attn_mask_,
+    const std::optional<Tensor>& attn_mask_,
     double dropout_p,
     bool is_causal,
-    c10::optional<double> scale) {
+    std::optional<double> scale) {
   TORCH_CHECK(
       query_.dtype() == key.dtype() && query_.dtype() == value.dtype(),
       "Expected query, key, and value to have the same dtype, but got query.dtype: ",
@@ -553,8 +498,8 @@ inline void validate_sdpa_input(
       query_.dim(), " key.dim: ", key.dim(), " and value.dim: ", value.dim(), " instead.");
   if (attn_mask_.has_value()){
     auto mask_dtype = attn_mask_->dtype();
-    TORCH_CHECK(mask_dtype == at::kBool || mask_dtype == query_.dtype(),
-      "Expected attn_mask dtype to be bool or to match query dtype, but got attn_mask.dtype: ",
+    TORCH_CHECK(mask_dtype == at::kBool || mask_dtype == at::kFloat || mask_dtype == query_.dtype(),
+      "Expected attn_mask dtype to be bool or float or to match query dtype, but got attn_mask.dtype: ",
       mask_dtype, " and  query.dtype: ", query_.dtype(), " instead.");
     TORCH_CHECK(
       !query_.is_nested() && !key.is_nested(),
@@ -568,7 +513,7 @@ inline void validate_sdpa_input(
 // the math and memory efficient attn_mask implementation
 //  Args:
 //    attn_mask: attn_mask of shape (B, L, S) or (L, S) or (B, N_heads, L, S)
-c10::optional<Tensor> convert_boolean_attn_mask(const c10::optional<Tensor>& attn_mask, caffe2::TypeMeta dtype) {
+std::optional<Tensor> convert_boolean_attn_mask(const std::optional<Tensor>& attn_mask, caffe2::TypeMeta dtype) {
   // Pass through
   if(!attn_mask.has_value()){
     return c10::nullopt;
@@ -591,9 +536,14 @@ c10::optional<Tensor> convert_boolean_attn_mask(const c10::optional<Tensor>& att
 // We apply this function to the top level SDPA so that
 // if padding is done it will be tracked for backward automatically
 
-template <int alignment>
-bool is_aligned(const SymInt& size){
-  return size % alignment == 0;
+template<int alignment>
+bool aligned_tensor(const at::Tensor& tensor){
+  for(const auto i : c10::irange(tensor.dim() - 1)){
+    if(tensor.sym_stride(i) % alignment != 0){
+      return false;
+    }
+  }
+  return tensor.sym_stride(-1) == 1;
 }
 
 template <int alignment>
@@ -609,26 +559,16 @@ at::Tensor preprocess_mask(
     const at::Tensor& query,
     const at::Tensor& key,
     const at::Tensor& value) {
-  constexpr int mem_eff_alignment = 16;
-  // Expand to 4d case
-  at::Tensor attn_mask = mask.expand_symint(
+  constexpr int mem_eff_alignment = 8;
+  at::Tensor result_mask = mask;
+  if (!aligned_tensor<mem_eff_alignment>(mask)) {
+    result_mask = pad_bias<mem_eff_alignment>(mask);
+  }
+  return result_mask.expand_symint(
       {query.sym_size(0),
        query.sym_size(1),
        query.sym_size(2),
        key.sym_size(2)});
-
-  bool aligned_last_dim = is_aligned<mem_eff_alignment>(attn_mask.sym_size(-1));
-  // Apply pad_bias and store the result in attn_mask
-  if (!aligned_last_dim) {
-    return pad_bias<mem_eff_alignment>(attn_mask);
-  }
-  // Check and make the tensor contiguous if needed
-  if (attn_mask.sym_stride(0) % 16 != 0 || attn_mask.sym_stride(1) % 16 != 0 ||
-      attn_mask.sym_stride(2) % 16 != 0) {
-    return attn_mask.contiguous();
-  }
-
-  return attn_mask;
 }
 // FlashAttentionV2 requires that head dimension be a multiple of 8
 // This was previously done within the kernel, however
@@ -652,14 +592,27 @@ at::Tensor pad_last_dim(const at::Tensor& attn_bias) {
 at::Tensor post_process_flash_output(
     at::Tensor out,
     c10::SymInt const& og_size) {
-  if (!out.is_nested()) {
+  if (!out.is_nested() && out.sym_size(-1) != og_size) {
     out = out.slice_symint(-1, 0, og_size);
-  } else {
-    TORCH_CHECK(
-        out.size(-1) == og_size,
-        "FlashAttentionV2 returned a nested tensor with an incorrect size")
   }
   return out;
+}
+
+int64_t handle_private_use(const Tensor& query_, const Tensor& key, const Tensor& value,
+    const std::optional<Tensor>& attn_mask_, double dropout_p, bool is_causal, std::optional<double> scale){
+  int64_t choice_int = static_cast<int64_t>(sdp::SDPBackend::math);
+  try {
+    choice_int = _fused_sdp_choice_stub(query_.device().type(),
+        query_, key, value, attn_mask_, dropout_p, is_causal, scale);
+  } catch(const ::c10::Error& e){
+  }
+  return choice_int;
+}
+
+bool should_compute_logsumexp(const Tensor& query, const Tensor& key, const Tensor& value) {
+  const bool any_inputs_require_grad = query.requires_grad() || key.requires_grad() || value.requires_grad();
+  const bool gradmode_enabled = at::GradMode::is_enabled();
+  return any_inputs_require_grad && gradmode_enabled;
 }
 
 } // namespace
@@ -672,8 +625,10 @@ at::Tensor post_process_flash_output(
 //     query (Tensor): Query tensor; shape (N, ..., L, E)
 //     key (Tensor): Key tensor; shape (N, ..., S, E)
 //     value (Tensor): Value tensor; shape (N, ..., S, E)
-//     attn_mask (optional Tensor): Attention mask; shape (N, ..., L, S) or (L, S). Currently, only a boolean mask
-//         is supported, where a value of True indicates that the element *should* take part in attention.
+//     attn_mask (optional Tensor): Attention mask; shape must be broadcastable to the shape of attention weights,
+//         which is (N,..., L, S). Two types of masks are supported.
+//         A boolean mask where a value of True indicates that the element *should* take part in attention.
+//         A float mask of the same type as query, key, value that is added to the attention score.
 //     dropout_p (float): Dropout probability; if greater than 0.0, dropout is applied
 //     need_attn_weights (bool): If true, the second return value will contain the attention weights used;
 //         otherwise, the second return value is unspecified
@@ -682,9 +637,8 @@ at::Tensor post_process_flash_output(
 //         to get specialized support for causal masks (and other types of masking e.g. local attention / block
 //         sparse masks) via tensor subclassing, allowing for a leaner API.
 //
-// Returns a tuple containing:
+// Returns a tensor:
 //     output (Tensor): Attention output; shape (N, ..., L, E)
-//     attn_weights (Tensor): Attention weighting; shape (N, ..., L, S)
 //
 // Shape legend:
 //     N: Batch size
@@ -696,20 +650,25 @@ Tensor scaled_dot_product_attention(
     const Tensor& query_,
     const Tensor& key,
     const Tensor& value,
-    const c10::optional<Tensor>& attn_mask_,
+    const std::optional<Tensor>& attn_mask_,
     double dropout_p,
     bool is_causal,
-    c10::optional<double> scale) {
+    std::optional<double> scale) {
   validate_sdpa_input(query_, key, value, attn_mask_, dropout_p, is_causal, scale);
   int64_t choice_int = static_cast<int64_t>(sdp::SDPBackend::math);
-  if (query_.device().type() == DeviceType::CUDA
-      || query_.device().type() == DeviceType::CPU){
+  if (_fused_sdp_choice_stub.is_device_supported(query_.device().type())) {
     choice_int = _fused_sdp_choice_stub(query_.device().type(),
-      query_, key, value, attn_mask_, dropout_p, is_causal, scale);
+          query_, key, value, attn_mask_, dropout_p, is_causal, scale);
   }
   sdp::SDPBackend backend = static_cast<sdp::SDPBackend>(choice_int);
-  c10::optional<Tensor> attn_mask = convert_boolean_attn_mask(attn_mask_, query_.dtype());
+  std::optional<Tensor> attn_mask = convert_boolean_attn_mask(attn_mask_, query_.dtype());
   switch (backend) {
+    case sdp::SDPBackend::cudnn_attention: {
+      bool compute_logsumexp = should_compute_logsumexp(query_, key, value);
+      auto out_lse_softmax = at::_scaled_dot_product_cudnn_attention(
+          query_, key, value, dropout_p, is_causal, compute_logsumexp, scale);
+      return std::get<0>(out_lse_softmax);
+    }
     case sdp::SDPBackend::flash_attention: {
       if(query_.device().type() == DeviceType::CUDA){
         c10::SymInt og_size = query_.sym_size(-1);
@@ -723,14 +682,11 @@ Tensor scaled_dot_product_attention(
         return post_process_flash_output(std::get<0>(out_lse_softmax), og_size);
       }
       // For the CPU case we do not need to pad the last dim
-      auto out_lse_softmax = at::_scaled_dot_product_flash_attention(
-          query_, key, value, dropout_p, is_causal, false /*return_debug_mask*/, scale);
-      return std::get<0>(out_lse_softmax);
+      return std::get<0>(at::_scaled_dot_product_flash_attention_for_cpu(
+          query_, key, value, dropout_p, is_causal, attn_mask, scale));
     }
     case sdp::SDPBackend::efficient_attention: {
-      bool compute_logsumexp =
-          (query_.requires_grad() || key.requires_grad() ||
-           value.requires_grad());
+      bool compute_logsumexp = should_compute_logsumexp(query_, key, value);
       if (attn_mask.has_value()) {
         attn_mask.value() = preprocess_mask(attn_mask.value(), query_, key, value);;
       }
@@ -758,8 +714,8 @@ Tensor scaled_dot_product_attention(
 
 std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math(
         const Tensor& query_, const Tensor& key, const Tensor& value,
-        const c10::optional<Tensor>& attn_mask_, double dropout_p, bool is_causal,
-        const c10::optional<Tensor>& dropout_mask, c10::optional<double> scale) {
+        const std::optional<Tensor>& attn_mask_, double dropout_p, bool is_causal,
+        const std::optional<Tensor>& dropout_mask, std::optional<double> scale) {
   C10_LOG_API_USAGE_ONCE("torch.sdpa.math_fallback");
   if (query_.is_nested() || key.is_nested() || value.is_nested()) {
     TORCH_CHECK(
@@ -811,82 +767,63 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math(
     return std::make_tuple(at::matmul(attn, value), attn);
 }
 
-std::tuple<
-    at::Tensor,
-    at::Tensor,
-    at::Tensor,
-    at::Tensor,
-    int64_t,
-    int64_t,
-    at::Tensor,
-    at::Tensor,
-    at::Tensor>
+std::tuple<at::Tensor, at::Tensor>
 _scaled_dot_product_flash_attention_cpu(
     const Tensor& query,
     const Tensor& key,
     const Tensor& value,
     double dropout_p,
     bool is_causal,
-    bool return_debug_mask,
-    c10::optional<double> scale) {
+    const std::optional<Tensor>& attn_mask,
+    std::optional<double> scale) {
   const auto dtype = query.scalar_type();
   int64_t batchSize = query.size(0);
   int64_t qSize = query.size(2);
   int64_t num_head = query.size(1);
   int64_t headSize = query.size(3);
 
-  TORCH_CHECK(c10::isFloatingType(dtype) && dtype != ScalarType::Half,
-    "scaled_dot_product_attention_flash_attention: Expected data type in FP32, FP64, BF16, but got ", dtype, " instead.");
+  TORCH_CHECK(c10::isFloatingType(dtype),
+    "scaled_dot_product_attention_flash_attention: Expected data type in FP32, FP64, BF16, FP16, but got ", dtype, " instead.");
   TORCH_CHECK(query.dim() == 4 && key.dim() == 4 && value.dim() == 4,
     "scaled_dot_product_attention_flash_attention: Accept only 4 dims inputs shape of {B, H, T, K}");
   TORCH_CHECK(dropout_p == 0.0,
     "scaled_dot_product_attention_flash_attention: Currently do not support dropout > 0");
   TORCH_CHECK((query.size(3) == value.size(3)) && (key.size(3) == value.size(3)),
     "scaled_dot_product_attention_flash_attention: Q/K/V should have the same head size");
-  TORCH_CHECK(return_debug_mask == false,
-    "scaled_dot_product_attention_flash_attention: Currently do not support 'return_debug_mask'");
+  TORCH_CHECK(!attn_mask.has_value() ||
+          attn_mask.value().scalar_type() == at::kFloat ||
+          dtype == attn_mask.value().scalar_type(),
+    "scaled_dot_product_attention_flash_attention: Attention mask is the same data type as query");
+  TORCH_CHECK(!attn_mask.has_value() ||
+          (attn_mask.value().dim() == 2 || attn_mask.value().dim() == 4),
+    "scaled_dot_product_attention_flash_attention: Attention mask dim in {2, 4}");
 
   at::Tensor output = at::empty({batchSize, qSize, num_head, headSize}, query.options());
   const auto accumulate_dtype = toOpMathType(dtype);
   at::Tensor logsumexp = at::empty({batchSize, qSize, num_head},
       query.options().dtype(accumulate_dtype));
-  at::Tensor cum_seq_q = at::empty({}, at::kLong);
-  at::Tensor cum_seq_k = at::empty({}, at::kLong);
-  int64_t max_q = 0;
-  int64_t max_k = 0;
-  at::Tensor philox_seed = at::empty({}, at::kLong);
-  at::Tensor philox_offset = at::empty({}, at::kLong);
-  at::Tensor debug_attn_mask = at::empty({}, query.options());
 
-  flash_attention_kernel(kCPU, output, logsumexp, cum_seq_q, cum_seq_k,
-      max_q, max_k, philox_seed, philox_offset, debug_attn_mask,
-      query, key, value, dropout_p, is_causal, return_debug_mask, scale);
+  flash_attention_kernel(kCPU, output, logsumexp,
+      query, key, value, dropout_p, is_causal, attn_mask, scale);
 
   output = output.transpose(1, 2);
   logsumexp = logsumexp.transpose(1, 2);
 
-  return std::make_tuple(std::move(output), std::move(logsumexp),
-      std::move(cum_seq_q), std::move(cum_seq_k), max_q, max_k,
-      std::move(philox_seed), std::move(philox_offset), std::move(debug_attn_mask));
+  return std::make_tuple(std::move(output), std::move(logsumexp));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
-_scaled_dot_product_flash_attention_backward_cpu(
+_scaled_dot_product_flash_attention_cpu_backward(
     const Tensor& grad_out,
     const Tensor& query,
     const Tensor& key,
     const Tensor& value,
     const Tensor& out,
     const Tensor& logsumexp,
-    const Tensor& cum_seq_q,
-    const Tensor& cum_seq_k,
-    const int64_t max_q,
-    const int64_t max_k,
     double dropout_p,
     bool is_causal,
-    const Tensor& philox_seed,
-    const Tensor& philox_offset,
-    c10::optional<double> scale) {
+    const std::optional<Tensor>& attn_mask,
+    std::optional<double> scale) {
   if (!grad_out.defined()) {
     return std::make_tuple(Tensor{}, Tensor{}, Tensor{});
   }
@@ -902,8 +839,8 @@ _scaled_dot_product_flash_attention_backward_cpu(
   auto grad_v = at::zeros(v_t.sizes(), value.options());
 
   flash_attention_backward_kernel(kCPU, grad_q, grad_k, grad_v,
-      grad_out_t, q_t, k_t, v_t, o_t, lse_t, cum_seq_q, cum_seq_k,
-      max_q, max_k, dropout_p, is_causal, philox_seed, philox_offset, scale);
+      grad_out_t, q_t, k_t, v_t, o_t, lse_t,
+      dropout_p, is_causal, attn_mask, scale);
 
   grad_q = grad_q.transpose(1, 2);
   grad_k = grad_k.transpose(1, 2);
@@ -922,7 +859,7 @@ Tensor triton_multi_head_attention(
     const Tensor& qkv_bias,
     const Tensor& proj_weight,
     const Tensor& proj_bias,
-    const c10::optional<Tensor>& mask) {
+    const std::optional<Tensor>& mask) {
   // query shape: [B, T, D]
   // qkv_weight shape: [3 * D, D]
   TORCH_CHECK(!mask, "Only causal mask is supported for Triton.");

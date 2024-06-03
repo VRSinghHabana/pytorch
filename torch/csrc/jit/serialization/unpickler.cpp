@@ -475,12 +475,12 @@ PickleOpCode Unpickler::readInstruction() {
           stack_.size());
       auto dict = c10::impl::GenericDict(AnyType::get(), AnyType::get());
       TORCH_CHECK(
-          stack_.size() % 2 == 0 && start % 2 == 0,
+          (stack_.size() - start) % 2 == 0,
           "Parsing error: stack_ is of size ",
           stack_.size(),
           " and start index is ",
           start,
-          ", but stack_ expected to contain even number of elements");
+          ", but stack_ is iterated by two elements at a time");
       for (size_t i = start; i < stack_.size(); i += 2) {
         dict.insert_or_assign(stack_[i], stack_[i + 1]);
       }
@@ -495,6 +495,13 @@ PickleOpCode Unpickler::readInstruction() {
           start > 0 && start <= stack_.size(),
           "Parsing error: wrong start index for stack_");
       auto dict = stack_.at(start - 1).toGenericDict();
+      TORCH_CHECK(
+          (stack_.size() - start) % 2 == 0,
+          "Parsing error: stack_ is of size ",
+          stack_.size(),
+          " and start index is ",
+          start,
+          ", but stack_ is iterated by two elemenst at a time");
       for (size_t i = start; i < stack_.size(); i += 2) {
         dict.insert_or_assign(stack_[i], stack_[i + 1]);
       }
@@ -815,7 +822,7 @@ void Unpickler::readGlobal(
     // like the other branches here because no REDUCE or BUILD will
     // be called on this value. Instead, we just put it on the stack
     // and return early
-    c10::optional<c10::ScalarType> scalar_type;
+    std::optional<c10::ScalarType> scalar_type;
 #define CHECK_SCALAR(_, name)          \
   if (class_name == #name "Storage") { \
     scalar_type = c10::k##name;        \
@@ -827,7 +834,7 @@ void Unpickler::readGlobal(
       return;
     }
 
-    c10::optional<at::QScheme> qscheme;
+    std::optional<at::QScheme> qscheme;
     for (int i = 0; i < at::COMPILE_TIME_NUM_QSCHEMES; ++i) {
       if (class_name == toString(static_cast<at::QScheme>(i))) {
         qscheme = static_cast<at::QScheme>(i);

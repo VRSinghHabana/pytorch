@@ -8,13 +8,16 @@ import pprint
 import pickle
 import collections
 import unittest
+import contextlib
 
-from torch.testing._internal.common_utils import TestCase, run_tests, TEST_WITH_CROSSREF
+from torch.testing._internal.common_utils import TestCase, run_tests, TEST_WITH_CROSSREF, TEST_WITH_TORCHDYNAMO
 from torch.overrides import (
     handle_torch_function,
     has_torch_function,
+    get_ignored_functions,
     get_overridable_functions,
     get_testing_overrides,
+    resolve_name,
     is_tensor_method_or_property,
     TorchFunctionMode,
     _get_current_function_mode,
@@ -215,7 +218,7 @@ class SubTensor(torch.Tensor):
     """
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if(kwargs is None):
+        if kwargs is None:
             kwargs = {}
 
         if func not in HANDLED_FUNCTIONS_SUB:
@@ -332,7 +335,7 @@ def generate_tensor_like_torch_implementations():
     # the problem.  A more proper fix is to make the "not tested" check
     # a test on its own, and to make sure the monkeypatch is only installed
     # for the span of the relevant test (and deleted afterwards)
-    testing_ignore = {"sample_functional"}
+    testing_ignore = {"sample_functional", "autocast"}
     for namespace, funcs in get_overridable_functions().items():
         for func in funcs:
             if func not in testing_overrides and func.__name__ not in testing_ignore:
@@ -366,7 +369,7 @@ class TensorLike:
     """
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if(kwargs is None):
+        if kwargs is None:
             kwargs = {}
 
         if func not in HANDLED_FUNCTIONS_TENSOR_LIKE:
@@ -375,6 +378,27 @@ class TensorLike:
         return HANDLED_FUNCTIONS_TENSOR_LIKE[func](*args, **kwargs)
 
 class TestTorchFunctionOverride(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._stack = contextlib.ExitStack()
+        if TEST_WITH_TORCHDYNAMO:
+            # Add classes to the wrapped tensor subclasses
+            @contextlib.contextmanager
+            def setup_subclasses():
+                old = set(torch._dynamo.config.traceable_tensor_subclasses)
+                torch._dynamo.config.traceable_tensor_subclasses.add(DiagonalTensor)
+                try:
+                    yield
+                finally:
+                    torch._dynamo.config.traceable_tensor_subclasses.clear()
+                    torch._dynamo.config.traceable_tensor_subclasses.update(old)
+
+            cls._stack.enter_context(setup_subclasses())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stack.close()
+
     def test_mean_semantics(self):
         """Test that a function with one argument can be overrided"""
         t1 = DiagonalTensor(5, 2)
@@ -636,7 +660,7 @@ def generate_tensor_like_override_tests(cls):
                 return instance_gen()
             elif arg_type == "TensorList" or arg_type == "ITensorListRef":
                 return [instance_gen(), instance_gen()]
-            elif arg_type == "c10::List<c10::optional<Tensor>>":
+            elif arg_type == "c10::List<::std::optional<Tensor>>":
                 return [instance_gen(), instance_gen()]
             elif arg_type == "IntArrayRef" or arg_type == "SymIntArrayRef":
                 size = arg.get("size", 2)
@@ -1137,6 +1161,14 @@ class TestTorchFunctionWarning(TestCase):
                 # Function that handles torch_function in C++
                 torch.abs(a)
 
+class TestDisabledUserWarnings(TestCase):
+    def test_no_implicit_user_warning_for_deprecated_functions(self):
+        self.assertNotWarn(get_ignored_functions)
+        self.assertNotWarn(get_testing_overrides)
+        self.assertNotWarn(get_overridable_functions)
+        self.assertNotWarn(lambda: resolve_name(torch.Tensor.add))
+        self.assertNotWarn(lambda: is_tensor_method_or_property(torch.Tensor.add))
+
 @unittest.skipIf(TEST_WITH_CROSSREF, "not run with crossref")
 class TestTorchFunctionMode(TestCase):
     def test_basic(self):
@@ -1196,7 +1228,7 @@ class TestTorchFunctionMode(TestCase):
 
         class A(TorchFunctionMode):
             def __torch_function__(self, *args, **kwargs):
-                raise ErrorA()
+                raise ErrorA
 
         with self.assertRaises(ErrorA):
             with A():
@@ -1208,7 +1240,7 @@ class TestTorchFunctionMode(TestCase):
 
         class A(TorchFunctionMode):
             def __torch_function__(self, *args, **kwargs):
-                raise ErrorA()
+                raise ErrorA
 
         x = A()
         with self.assertRaises(ErrorA):
@@ -1376,6 +1408,28 @@ class TestTorchFunctionMode(TestCase):
             torch._C._nn._parse_to('cpu')
 
         self.assertTrue(called)
+
+    def test_getitem_call(self):
+        # This failed because the parser thinks the function is called to()
+        # but it's actually called _parse_to()
+
+        called = False
+
+        class A(TorchFunctionMode):
+            def __torch_function__(self, func, types, args=(), kwargs=None):
+                nonlocal called
+                if kwargs is None:
+                    kwargs = {}
+                called = True
+                return func(*args, **kwargs)
+
+        a = torch.zeros(5)
+        b = torch.tensor(0)
+        with A():
+            a[b]
+
+        self.assertTrue(called)
+
 
     def test_distributions_bernoulli(self):
         # This failed because improper use of has_torch_function when

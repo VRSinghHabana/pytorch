@@ -1,4 +1,4 @@
-# Owner(s): ["module: primTorch"]
+# Owner(s): ["module: decompositions"]
 
 from functools import partial
 from itertools import product
@@ -338,7 +338,7 @@ $1: f32[2] = torch._ops.prims.sin.default($0)""")
         prims.mul(torch.randn(2), 1 + 1j)
 
     def test_check_deprecation_warning(self):
-        with self.assertWarnsRegex(DeprecationWarning, 'will be removed in the future'):
+        with self.assertWarnsRegex(FutureWarning, 'will be removed in the future'):
             torch._prims_common.check(True, lambda: 'message')
 
 
@@ -397,6 +397,13 @@ class TestRefs(TestCase):
         actual = refs.linspace(2, 10 + 5j, steps=5)
         expect = torch.linspace(2, 10 + 5j, steps=5)
         self.assertEqual(actual, expect)
+
+    # From https://github.com/pytorch/pytorch/issues/109558
+    def test_infinite_loop_from_py_dispatcher(self):
+        # enables prim decomps
+        with torch._dispatch.python.enable_python_dispatcher():
+            x = torch.ones(4)
+            y = x.to(device="meta")
 
 
 instantiate_device_type_tests(TestRefs, globals())

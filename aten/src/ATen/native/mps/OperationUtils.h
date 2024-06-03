@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <initializer_list>
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/Tensor.h>
 #include <ATen/Utils.h>
@@ -25,9 +26,15 @@
 
 #include <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
+// Fwd declarations
+namespace at {
+  struct TensorIteratorBase;
+}
 using namespace at::mps;
 
 namespace at::native::mps {
+
+void dispatch_sync_with_rethrow(dispatch_queue_t queue, void (^block)());
 
 struct MPSScalar {
   id<MTLBuffer> getMTLBuffer() const { return __builtin_bit_cast(id<MTLBuffer>, buffer.get()); }
@@ -40,11 +47,13 @@ struct MPSScalar {
     at::Half h;
     int64_t i;
     bool b;
+    c10::complex<float> cf;
+    c10::complex<at::Half> ch;
+    at::BFloat16 bf16;
   } value {};
 };
 
-void runMPSGraph(
-    MPSStream* mpsStream,
+void runMPSGraph(MPSStream* mpsStream,
     MPSGraph* mpsGraph,
     NSDictionary* feeds,
     NSDictionary* results);
@@ -63,10 +72,13 @@ static inline std::string getMPSTypeString(const Tensor& t, bool short_name = fa
   return getMPSTypeString(t.scalar_type(), short_name);
 }
 std::string scalarToMetalTypeString(const c10::ScalarType& scalar_type);
+static inline std::string scalarToMetalTypeString(const Tensor& t) {
+  return scalarToMetalTypeString(t.scalar_type());
+}
 NSArray<NSNumber*>* getTensorAxes(const Tensor& t);
 NSArray<NSNumber*>* getTensorAxes(const IntArrayRef& sizes, at::OptionalIntArrayRef dim);
 std::string getMPSShapeString(MPSShape* shape);
-std::string getTensorsStringKey(const TensorList& tensors, bool short_dtype = true);
+std::string getTensorsStringKey(const TensorList& tensors, bool short_dtype = true, bool exclude_shape = false);
 std::string getArrayRefString(const IntArrayRef s);
 // use has_storage() on the returned tensor to determine if src actually is a view
 Tensor gatherViewTensor(const at::Tensor& src, at::Tensor& dst);
@@ -220,31 +232,22 @@ struct MPSGraphCache
   MPSCachedGraph* CreateCachedGraph(const std::string& key, CreateCachedGraphBlock createCacheBlock) {
 
     __block MPSCachedGraph* cachedGraph = nil;
-    __block std::optional<std::exception_ptr> block_exception;
 
     MPSCacheKey hash = std::hash<std::string>{}(key);
 
-    dispatch_sync(serialQueue_, ^() {
-
-      try {
-        // verify the cached entry doesn't already exist
-        if (cache_.count(hash) != 0) {
-          auto& entry = cache_.at(hash);
-          TORCH_INTERNAL_ASSERT_DEBUG_ONLY(key == entry.key_, "Key collision in the MPS cached graph!\n");
-          cachedGraph = entry.cachedGraph_;
-        } else {
-          cachedGraph = createCacheBlock();
-          CacheEntry entry(key, cachedGraph);
-          cache_.emplace(hash, entry);
-          profileCachedGraph(entry);
-        }
-      } catch (...) {
-        block_exception = std::current_exception();
+    dispatch_sync_with_rethrow(serialQueue_, ^() {
+      // verify the cached entry doesn't already exist
+      if (cache_.count(hash) != 0) {
+        auto& entry = cache_.at(hash);
+        TORCH_INTERNAL_ASSERT_DEBUG_ONLY(key == entry.key_, "Key collision in the MPS cached graph!\n");
+        cachedGraph = entry.cachedGraph_;
+      } else {
+        cachedGraph = createCacheBlock();
+        CacheEntry entry(key, cachedGraph);
+        cache_.emplace(hash, entry);
+        profileCachedGraph(entry);
       }
     });
-    if (block_exception) {
-            std::rethrow_exception(*block_exception);
-    }
     return cachedGraph;
   }
 
@@ -328,6 +331,107 @@ size_t compute_storage_numel_distance(const at::Tensor& t);
  */
 inline bool is_dense_in_storage(const at::Tensor& t) {
   return compute_storage_numel_distance(t) == static_cast<size_t>(t.numel());
+}
+
+
+class MetalShaderLibrary {
+public:
+  MetalShaderLibrary(const std::string& src, unsigned nparams_ = 0): shaderSource(src), nparams(nparams_) {}
+  MetalShaderLibrary(const MetalShaderLibrary&) = delete;
+  inline id<MTLComputePipelineState> getPipelineStateForFunc(const std::string& fname) {
+    return getLibraryPipelineState(getLibrary(), fname);
+  }
+  id<MTLComputePipelineState> getPipelineStateForFunc(const std::string& fname, const std::initializer_list<std::string>& params) {
+    return getLibraryPipelineState(getLibrary(params), fname);
+  }
+private:
+  id<MTLComputePipelineState> getLibraryPipelineState(id<MTLLibrary> lib, const std::string& fname);
+  id<MTLLibrary> getLibrary();
+  id<MTLLibrary> getLibrary(const std::initializer_list<std::string>& params);
+
+  id<MTLLibrary> compileLibrary(const std::string& src);
+  std::string shaderSource;
+  unsigned nparams;
+  id<MTLLibrary> library = nil;
+  std::unordered_map<std::string, id<MTLLibrary>> libMap;
+  std::unordered_map<std::string, id<MTLComputePipelineState>> cplMap;
+};
+
+static inline void mtl_setBuffer(id<MTLComputeCommandEncoder> encoder, const Tensor& t, unsigned idx) {
+  [encoder setBuffer:getMTLBufferStorage(t)
+              offset:t.storage_offset() * t.element_size()
+             atIndex:idx];
+}
+
+static inline void mtl_dispatch1DJob(id<MTLComputeCommandEncoder> encoder,
+                                     id<MTLComputePipelineState> cplState,
+                                     uint32_t length) {
+  const uint32_t maxThreadsPerGroup = [cplState maxTotalThreadsPerThreadgroup];
+  auto size = MTLSizeMake(length, 1, 1);
+  auto threadGroupSize = MTLSizeMake(std::min(maxThreadsPerGroup, length), 1, 1);
+  [encoder dispatchThreads:size threadsPerThreadgroup:threadGroupSize];
+}
+
+id<MTLBuffer> generateKernelDataOffsets(id<MTLComputeCommandEncoder> commandEncoder, const TensorIteratorBase& iter, bool use_64bit_index = false);
+
+inline NSDictionary* dictionaryFromPlaceholders(Placeholder& p1) {
+        return @{ p1.getMPSGraphTensor(): p1.getMPSGraphTensorData() };
+}
+
+inline NSDictionary* dictionaryFromPlaceholders(Placeholder& p1, Placeholder& p2) {
+        return @{
+                p1.getMPSGraphTensor(): p1.getMPSGraphTensorData(),
+                p2.getMPSGraphTensor(): p2.getMPSGraphTensorData(),
+         };
+}
+
+inline NSDictionary* dictionaryFromPlaceholders(Placeholder& p1, Placeholder& p2, Placeholder& p3) {
+        return @{
+                p1.getMPSGraphTensor(): p1.getMPSGraphTensorData(),
+                p2.getMPSGraphTensor(): p2.getMPSGraphTensorData(),
+                p3.getMPSGraphTensor(): p3.getMPSGraphTensorData(),
+         };
+}
+
+inline NSDictionary* dictionaryFromPlaceholders(Placeholder& p1, Placeholder& p2, Placeholder& p3, Placeholder& p4) {
+        return @{
+                p1.getMPSGraphTensor(): p1.getMPSGraphTensorData(),
+                p2.getMPSGraphTensor(): p2.getMPSGraphTensorData(),
+                p3.getMPSGraphTensor(): p3.getMPSGraphTensorData(),
+                p4.getMPSGraphTensor(): p4.getMPSGraphTensorData(),
+         };
+}
+
+inline void runMPSGraph(MPSStream* stream, MPSGraph* graph, NSDictionary* feeds, Placeholder& result) {
+        runMPSGraph(stream, graph, feeds, dictionaryFromPlaceholders(result));
+}
+
+inline bool supportsComplex() {
+  return is_macos_13_or_newer(MacOSVersion::MACOS_VER_14_0_PLUS);
+}
+
+// MPS yet to support double types, but starting from MacOS 14, supports bfloat16
+inline bool supportedFloatingType(ScalarType dtype) {
+  return dtype == kFloat || dtype == kHalf || dtype == kBFloat16;
+}
+
+inline bool supportedFloatingType(const Tensor& t) {
+  return supportedFloatingType(t.scalar_type());
+}
+
+inline bool supportedFloatingOrComplexType(ScalarType dtype) {
+  if (dtype == kComplexFloat || dtype == kComplexHalf) {
+    return supportsComplex();
+  }
+  return supportedFloatingType(dtype);
+}
+inline bool supportedFloatingOrComplexType(const Tensor& t) {
+  return supportedFloatingOrComplexType(t.scalar_type());
+}
+
+
+inline bool needsGather(const Tensor& t) {
+  return !t.is_contiguous() || t.storage_offset();
 }
 
 } // namespace at::native::mps

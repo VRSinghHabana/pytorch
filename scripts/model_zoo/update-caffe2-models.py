@@ -37,7 +37,7 @@ class SomeClass:
                 print(f"Abort: {e}")
                 print("Cleaning up...")
                 deleteDirectory(model_dir)
-                exit(1)
+                sys.exit(1)
 
     def _caffe2_model_dir(self, model):
         caffe2_home = os.path.expanduser("~/.caffe2")
@@ -110,7 +110,7 @@ def generate_models():
         caffe2_model_dir = sc._caffe2_model_dir(model)
         onnx_model_dir, onnx_models_dir = sc._onnx_model_dir(model)
         subprocess.check_call(["echo", model])
-        with open(os.path.join(caffe2_model_dir, "value_info.json"), "r") as f:
+        with open(os.path.join(caffe2_model_dir, "value_info.json")) as f:
             value_info = f.read()
         subprocess.check_call(
             [

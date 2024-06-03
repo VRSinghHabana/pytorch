@@ -1,5 +1,6 @@
 import numbers
 import warnings
+from typing_extensions import deprecated
 
 import torch
 import torch.nn as nn
@@ -16,8 +17,11 @@ def _apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Ten
     return tensor.index_select(dim, permutation)
 
 
+@deprecated(
+    "`apply_permutation` is deprecated, please use `tensor.index_select(dim, permutation)` instead",
+    category=FutureWarning,
+)
 def apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
-    warnings.warn("apply_permutation is deprecated, please use tensor.index_select(dim, permutation) instead")
     return _apply_permutation(tensor, permutation, dim)
 
 
@@ -264,7 +268,7 @@ class RNNBase(torch.nn.Module):
         self._all_weight_values = torch.nn.ModuleList(_all_weight_values)
 
     @classmethod
-    def from_float(cls, mod):
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
         assert type(mod) in {torch.nn.LSTM,
                              torch.nn.GRU}, 'nn.quantized.dynamic.RNNBase.from_float only works for nn.LSTM and nn.GRU'
         assert hasattr(
@@ -491,8 +495,8 @@ class LSTM(RNNBase):
             return self.forward_tensor(input, hx)
 
     @classmethod
-    def from_float(cls, mod):
-        return super().from_float(mod)
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
+        return super().from_float(mod, use_precomputed_fake_quant=use_precomputed_fake_quant)
 
     @classmethod
     def from_reference(cls, ref_mod):
@@ -524,15 +528,15 @@ class GRU(RNNBase):
         \begin{array}{ll}
             r_t = \sigma(W_{ir} x_t + b_{ir} + W_{hr} h_{(t-1)} + b_{hr}) \\
             z_t = \sigma(W_{iz} x_t + b_{iz} + W_{hz} h_{(t-1)} + b_{hz}) \\
-            n_t = \tanh(W_{in} x_t + b_{in} + r_t * (W_{hn} h_{(t-1)}+ b_{hn})) \\
-            h_t = (1 - z_t) * n_t + z_t * h_{(t-1)}
+            n_t = \tanh(W_{in} x_t + b_{in} + r_t \odot (W_{hn} h_{(t-1)}+ b_{hn})) \\
+            h_t = (1 - z_t) \odot n_t + z_t \odot h_{(t-1)}
         \end{array}
 
     where :math:`h_t` is the hidden state at time `t`, :math:`x_t` is the input
     at time `t`, :math:`h_{(t-1)}` is the hidden state of the layer
     at time `t-1` or the initial hidden state at time `0`, and :math:`r_t`,
     :math:`z_t`, :math:`n_t` are the reset, update, and new gates, respectively.
-    :math:`\sigma` is the sigmoid function, and :math:`*` is the Hadamard product.
+    :math:`\sigma` is the sigmoid function, and :math:`\odot` is the Hadamard product.
 
     In a multilayer GRU, the input :math:`x^{(l)}_t` of the :math:`l` -th layer
     (:math:`l >= 2`) is the hidden state :math:`h^{(l-1)}_t` of the previous layer multiplied by
@@ -610,20 +614,20 @@ class GRU(RNNBase):
 
     .. note::
         The calculation of new gate :math:`n_t` subtly differs from the original paper and other frameworks.
-        In the original implementation, the Hadamard product :math:`(*)` between :math:`r_t` and the
+        In the original implementation, the Hadamard product :math:`(\odot)` between :math:`r_t` and the
         previous hidden state :math:`h_{(t-1)}` is done before the multiplication with the weight matrix
         `W` and addition of bias:
 
         .. math::
             \begin{aligned}
-                n_t = \tanh(W_{in} x_t + b_{in} + W_{hn} ( r_t * h_{(t-1)} ) + b_{hn})
+                n_t = \tanh(W_{in} x_t + b_{in} + W_{hn} ( r_t \odot h_{(t-1)} ) + b_{hn})
             \end{aligned}
 
         This is in contrast to PyTorch implementation, which is done after :math:`W_{hn} h_{(t-1)}`
 
         .. math::
             \begin{aligned}
-                n_t = \tanh(W_{in} x_t + b_{in} + r_t * (W_{hn} h_{(t-1)}+ b_{hn}))
+                n_t = \tanh(W_{in} x_t + b_{in} + r_t \odot (W_{hn} h_{(t-1)}+ b_{hn}))
             \end{aligned}
 
         This implementation differs on purpose for efficiency.
@@ -743,8 +747,8 @@ class GRU(RNNBase):
             return self.forward_tensor(input, hx)
 
     @classmethod
-    def from_float(cls, mod):
-        return super().from_float(mod)
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
+        return super().from_float(mod, use_precomputed_fake_quant=use_precomputed_fake_quant)
 
     @classmethod
     def from_reference(cls, ref_mod):
@@ -835,7 +839,7 @@ class RNNCellBase(torch.nn.Module):
                 f"hidden{hidden_label} has inconsistent hidden_size: got {hx.size(1)}, expected {self.hidden_size}")
 
     @classmethod
-    def from_float(cls, mod):
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
         assert type(mod) in {torch.nn.LSTMCell,
                              torch.nn.GRUCell,
                              torch.nn.RNNCell}, 'nn.quantized.dynamic.RNNCellBase.from_float \
@@ -1008,8 +1012,8 @@ class RNNCell(RNNCellBase):
         return ret
 
     @classmethod
-    def from_float(cls, mod):
-        return super().from_float(mod)
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
+        return super().from_float(mod, use_precomputed_fake_quant=use_precomputed_fake_quant)
 
 
 class LSTMCell(RNNCellBase):
@@ -1051,8 +1055,8 @@ class LSTMCell(RNNCellBase):
             self.bias_ih, self.bias_hh)
 
     @classmethod
-    def from_float(cls, mod):
-        return super().from_float(mod)
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
+        return super().from_float(mod, use_precomputed_fake_quant=use_precomputed_fake_quant)
 
 
 class GRUCell(RNNCellBase):
@@ -1092,5 +1096,5 @@ class GRUCell(RNNCellBase):
         )
 
     @classmethod
-    def from_float(cls, mod):
-        return super().from_float(mod)
+    def from_float(cls, mod, use_precomputed_fake_quant=False):
+        return super().from_float(mod, use_precomputed_fake_quant=use_precomputed_fake_quant)

@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 """
 Utility function to facilitate testing.
 
@@ -195,6 +197,10 @@ def assert_equal(actual, desired, err_msg="", verbose=True):
         else:
             return True
 
+    if isinstance(desired, str) and isinstance(actual, str):
+        assert actual == desired
+        return
+
     if isinstance(desired, dict):
         if not isinstance(actual, dict):
             raise AssertionError(repr(type(actual)))
@@ -209,6 +215,7 @@ def assert_equal(actual, desired, err_msg="", verbose=True):
         for k in range(len(desired)):
             assert_equal(actual[k], desired[k], f"item={k!r}\n{err_msg}", verbose)
         return
+
     from torch._numpy import imag, iscomplexobj, isscalar, ndarray, real, signbit
 
     if isinstance(actual, ndarray) or isinstance(desired, ndarray):
@@ -240,7 +247,7 @@ def assert_equal(actual, desired, err_msg="", verbose=True):
             assert_equal(actualr, desiredr)
             assert_equal(actuali, desiredi)
         except AssertionError:
-            raise AssertionError(msg)
+            raise AssertionError(msg)  # noqa: B904
 
     # isscalar test to check cases such as [np.nan] != np.nan
     if isscalar(desired) != isscalar(actual):
@@ -272,7 +279,7 @@ def assert_equal(actual, desired, err_msg="", verbose=True):
     except (DeprecationWarning, FutureWarning) as e:
         # this handles the case when the two types are not even comparable
         if "elementwise == comparison" in e.args[0]:
-            raise AssertionError(msg)
+            raise AssertionError(msg)  # noqa: B904
         else:
             raise
 
@@ -419,7 +426,7 @@ def assert_almost_equal(actual, desired, decimal=7, err_msg="", verbose=True):
             assert_almost_equal(actualr, desiredr, decimal=decimal)
             assert_almost_equal(actuali, desiredi, decimal=decimal)
         except AssertionError:
-            raise AssertionError(_build_err_msg())
+            raise AssertionError(_build_err_msg())  # noqa: B904
 
     if isinstance(actual, (ndarray, tuple, list)) or isinstance(
         desired, (ndarray, tuple, list)
@@ -592,7 +599,7 @@ def assert_array_compare(
         if (x_id == y_id).all().item() is not True:
             msg = build_err_msg(
                 [x, y],
-                err_msg + "\nx and y %s location mismatch:" % (hasval),
+                err_msg + f"\nx and y {hasval} location mismatch:",
                 verbose=verbose,
                 header=header,
                 names=("x", "y"),
@@ -719,7 +726,7 @@ def assert_array_compare(
             names=("x", "y"),
             precision=precision,
         )
-        raise ValueError(msg)
+        raise ValueError(msg)  # noqa: B904
 
 
 def assert_array_equal(x, y, err_msg="", verbose=True, *, strict=False):
@@ -1161,7 +1168,7 @@ def decorate_methods(cls, decorator, testmatch=None):
 
     """
     if testmatch is None:
-        testmatch = re.compile(r"(?:^|[\\b_\\.%s-])[Tt]est" % os.sep)
+        testmatch = re.compile(rf"(?:^|[\\b_\\.{os.sep}-])[Tt]est")
     else:
         testmatch = re.compile(testmatch)
     cls_attr = cls.__dict__
@@ -2265,7 +2272,9 @@ def check_free_memory(free_bytes):
         try:
             mem_free = _parse_size(env_value)
         except ValueError as exc:
-            raise ValueError(f"Invalid environment variable {env_var}: {exc}")
+            raise ValueError(  # noqa: B904
+                f"Invalid environment variable {env_var}: {exc}"
+            )
 
         msg = (
             f"{free_bytes/1e9} GB memory required, but environment variable "

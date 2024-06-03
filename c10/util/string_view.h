@@ -1,9 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <limits>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,7 +42,7 @@ class basic_string_view final {
 
   static constexpr size_type npos = size_type(-1);
 
-  constexpr basic_string_view() noexcept : begin_(nullptr), size_(0) {}
+  constexpr basic_string_view() noexcept : begin_(nullptr) {}
 
   explicit constexpr basic_string_view(const_pointer str, size_type count)
       : begin_(str), size_(count) {}
@@ -316,7 +319,6 @@ class basic_string_view final {
 
   constexpr size_type find(basic_string_view v, size_type pos = 0)
       const noexcept {
-    // if we are in C++14, write it iteratively. This is faster.
     if (v.size() == 0) {
       return pos <= size() ? pos : npos;
     }
@@ -467,7 +469,6 @@ class basic_string_view final {
 
  private:
   static constexpr size_type strlen_(const_pointer str) noexcept {
-    // if we are in C++14, write it iteratively. This is faster.
     const_pointer current = str;
     while (*current != '\0') {
       ++current;
@@ -485,9 +486,9 @@ class basic_string_view final {
   }
 
   template <class Condition>
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
   constexpr size_type find_first_if_(size_type pos, Condition&& condition)
       const noexcept {
-    // if we are in C++14, write it iteratively. This is faster.
     if (pos + 1 <= size()) {
       for (size_type cur = pos; cur < size(); ++cur) {
         if (condition(at_(cur))) {
@@ -499,6 +500,7 @@ class basic_string_view final {
   }
 
   template <class Condition>
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
   constexpr size_type find_last_if_(size_type pos, Condition&& condition)
       const noexcept {
     // Write it iteratively. This is faster.
@@ -520,8 +522,6 @@ class basic_string_view final {
     return size() == rhs.size() &&
         0 == __builtin_memcmp(data(), rhs.data(), size());
 #else
-    // if we are in C++14, write it iteratively. This is faster than the
-    // recursive C++11 implementation below.
     if (size() != rhs.size()) {
       return false;
     }
@@ -572,10 +572,6 @@ class basic_string_view final {
 };
 
 template <class CharT>
-const typename basic_string_view<CharT>::size_type
-    basic_string_view<CharT>::npos;
-
-template <class CharT>
 inline std::basic_ostream<CharT>& operator<<(
     std::basic_ostream<CharT>& stream,
     basic_string_view<CharT> sv) {
@@ -588,7 +584,7 @@ inline std::basic_ostream<CharT>& operator<<(
 template <class CharT>
 constexpr inline void swap(
     basic_string_view<CharT>& lhs,
-    basic_string_view<CharT>& rhs) {
+    basic_string_view<CharT>& rhs) noexcept {
   lhs.swap(rhs);
 }
 
@@ -600,7 +596,7 @@ namespace std {
 template <class CharT>
 struct hash<::c10::basic_string_view<CharT>> {
   size_t operator()(::c10::basic_string_view<CharT> x) const {
-    // The standard says that std""string_view hashing must do the same as
+    // The standard says that std::string_view hashing must do the same as
     // std::string hashing but leaves the details of std::string hashing
     // up to the implementer. So, to be conformant, we need to re-use and
     // existing STL type's hash function. The std::string fallback is probably

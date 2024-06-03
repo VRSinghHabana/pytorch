@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 """ Implementation of reduction operations, to be wrapped into arrays, dtypes etc
 in the 'public' layer.
 
@@ -6,25 +8,27 @@ Anything here only deals with torch objects, e.g. "dtype" is a torch.dtype insta
 from __future__ import annotations
 
 import functools
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 
 from . import _dtypes_impl, _util
-from ._normalizations import (
-    ArrayLike,
-    AxisLike,
-    DTypeLike,
-    KeepDims,
-    NotImplementedType,
-    OutArray,
-)
+
+if TYPE_CHECKING:
+    from ._normalizations import (
+        ArrayLike,
+        AxisLike,
+        DTypeLike,
+        KeepDims,
+        NotImplementedType,
+        OutArray,
+    )
 
 
 def _deco_axis_expand(func):
     """
     Generically handle axis arguments in reductions.
-    axis is *always* the 2nd arg in the funciton so no need to have a look at its signature
+    axis is *always* the 2nd arg in the function so no need to have a look at its signature
     """
 
     @functools.wraps(func)
@@ -71,6 +75,9 @@ def argmax(
     *,
     keepdims: KeepDims = False,
 ):
+    if a.is_complex():
+        raise NotImplementedError(f"argmax with dtype={a.dtype}.")
+
     axis = _util.allow_only_single_axis(axis)
 
     if a.dtype == torch.bool:
@@ -88,6 +95,9 @@ def argmin(
     *,
     keepdims: KeepDims = False,
 ):
+    if a.is_complex():
+        raise NotImplementedError(f"argmin with dtype={a.dtype}.")
+
     axis = _util.allow_only_single_axis(axis)
 
     if a.dtype == torch.bool:
@@ -134,6 +144,9 @@ def amax(
     initial: NotImplementedType = None,
     where: NotImplementedType = None,
 ):
+    if a.is_complex():
+        raise NotImplementedError(f"amax with dtype={a.dtype}")
+
     return a.amax(axis)
 
 
@@ -149,6 +162,9 @@ def amin(
     initial: NotImplementedType = None,
     where: NotImplementedType = None,
 ):
+    if a.is_complex():
+        raise NotImplementedError(f"amin with dtype={a.dtype}")
+
     return a.amin(axis)
 
 
@@ -409,9 +425,14 @@ def percentile(
     *,
     interpolation: NotImplementedType = None,
 ):
+    # np.percentile(float_tensor, 30) : q.dtype is int64 => q / 100.0 is float32
+    if _dtypes_impl.python_type_for_torch(q.dtype) == int:
+        q = q.to(_dtypes_impl.default_dtypes().float_dtype)
+    qq = q / 100.0
+
     return quantile(
         a,
-        q / 100.0,
+        qq,
         axis=axis,
         overwrite_input=overwrite_input,
         method=method,

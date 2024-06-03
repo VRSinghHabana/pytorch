@@ -7,6 +7,7 @@ torch.mps
     :toctree: generated
     :nosignatures:
 
+    device_count
     synchronize
     get_rng_state
     set_rng_state
@@ -34,3 +35,9 @@ MPS Event
     :nosignatures:
 
     event.Event
+
+
+.. This module needs to be documented. Adding here in the meantime
+.. for tracking purposes
+.. py:module:: torch.mps.event
+.. py:module:: torch.mps.profiler

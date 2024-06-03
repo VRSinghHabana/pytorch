@@ -3,10 +3,8 @@
 #include <ATen/core/functional.h>
 #include <c10/util/Exception.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/jit/frontend/ir_emitter.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
-#include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
 #include <torch/csrc/jit/passes/inliner.h>
 #include <torch/csrc/jit/passes/lower_tuples.h>
@@ -16,8 +14,7 @@
 #include <algorithm>
 #include <memory>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 using value_map = std::unordered_map<Value*, Value*>;
 using value_set = std::unordered_set<Value*>;
@@ -131,7 +128,7 @@ bool isDifferentiable(Graph& g) {
 // will be cleaned up later using EliminateDeadCode(block). TupleUnPack node in
 // backward graph will be removed in eliminateDeadcode(ReverseDetails) defined
 // in this file.
-static c10::optional<std::vector<Value*>> build_script_grad(
+static std::optional<std::vector<Value*>> build_script_grad(
     Node* node,
     const ArrayRef<Value*>& grads) {
   auto graph = node->owningGraph();
@@ -355,7 +352,7 @@ bool outputRequiresGrad(Value* output) {
   if (output->type()->castRaw<TensorType>() == nullptr) {
     return output->requires_grad();
   }
-  c10::optional<bool> requiresGrad =
+  std::optional<bool> requiresGrad =
       output->type()->expectRef<TensorType>().requiresGrad();
   if (requiresGrad.has_value()) {
     return *requiresGrad;
@@ -394,7 +391,7 @@ static ReverseDetails addReverseInline(Gradient& grad_desc) {
     auto it = grad_map.find(v);
     if (it == grad_map.end()) {
       auto autograd_zero = graph.insertNode(graph.createAutogradZero());
-      std::tie(it, std::ignore) = grad_map.emplace(v, autograd_zero->output());
+      it = grad_map.emplace(v, autograd_zero->output()).first;
     }
     return it->second;
   };
@@ -868,5 +865,4 @@ Gradient differentiate(std::shared_ptr<Graph>& graph) {
   UpdateDifferentiableGraphRequiresGrad(grad_desc.f, false);
   return grad_desc;
 }
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

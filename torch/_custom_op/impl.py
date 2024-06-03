@@ -1,4 +1,3 @@
-import contextlib
 import dataclasses
 import functools
 import inspect
@@ -11,8 +10,12 @@ from torchgen.model import FunctionSchema, OperatorName, SchemaKind, BaseType, L
 import torch
 import torch._C as _C
 import torch.library as library
+from torch._library.abstract_impl import AbstractImplCtx
+from torch.library import get_ctx
 
 from .autograd import autograd_kernel_indirection, construct_autograd_kernel
+import torch._library.infer_schema
+from torch._library.infer_schema import infer_schema
 
 """
 For a detailed guide on custom ops, please see
@@ -77,13 +80,14 @@ def custom_op(
             you may provide us the schema string.
 
     Example::
+        >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_CUDA)
         >>> import numpy as np
         >>> from torch import Tensor
         >>>
         >>> # Step 1: define the CustomOp.
         >>> # We need to provide the decorator a "prototype function"
         >>> # (a function with Python ellipses as the body).
-        >>> @custom_op("mylibrary::numpy_sin")
+        >>> @custom_op("my_library::numpy_sin")
         >>> def numpy_sin(x: Tensor) -> Tensor:
         >>>     ...
         >>>
@@ -93,12 +97,12 @@ def custom_op(
         >>> # Step 2: Register an implementation for various PyTorch subsystems
         >>>
         >>> # Register an implementation for CPU tensors
-        >>> @numpy_sin.impl('cpu'):
+        >>> @numpy_sin.impl('cpu')
         >>> def numpy_sin_impl_cpu(x):
         >>>     return torch.from_numpy(np.sin(x.numpy()))
         >>>
         >>> # Register an implementation for CUDA tensors
-        >>> @numpy_sin.impl('cuda'):
+        >>> @numpy_sin.impl('cuda')
         >>> def numpy_sin_impl_cuda(x):
         >>>     return torch.from_numpy(np.sin(x.cpu().numpy())).to(x.device)
         >>>
@@ -274,28 +278,29 @@ class CustomOp:
             device_types (str or Iterable[str]): the device type(s) to register the function for.
 
         Examples::
+            >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_CUDA)
             >>> import numpy as np
             >>> from torch import Tensor
             >>>
-            >>> @custom_op("mylibrary::numpy_sin")
-            >>> def numpy_sin(x: Tensor) -> Tensor:
+            >>> @custom_op("my_library::numpy_cos")
+            >>> def numpy_cos(x: Tensor) -> Tensor:
             >>>     ...
             >>>
             >>> # Register an implementation for CPU Tensors
-            >>> @numpy_sin.impl('cpu'):
-            >>> def numpy_sin_impl_cpu(x):
-            >>>     return torch.from_numpy(np.sin(x.numpy()))
+            >>> @numpy_cos.impl('cpu')
+            >>> def numpy_cos_impl_cpu(x):
+            >>>     return torch.from_numpy(np.cos(x.numpy()))
             >>>
             >>> # Register an implementation for CUDA Tensors
-            >>> @numpy_sin.impl('cuda'):
-            >>> def numpy_sin_impl_cuda(x):
-            >>>     return torch.from_numpy(np.sin(x.cpu().numpy())).to(x.device)
+            >>> @numpy_cos.impl('cuda')
+            >>> def numpy_cos_impl_cuda(x):
+            >>>     return torch.from_numpy(np.cos(x.cpu().numpy())).to(x.device)
             >>>
             >>> x = torch.randn(3)
-            >>> numpy_sin(x)  # calls numpy_sin_impl_cpu
+            >>> numpy_cos(x)  # calls numpy_cos_impl_cpu
             >>>
             >>> x_cuda = x.cuda()
-            >>> numpy_sin(x)  # calls numpy_sin_impl_cuda
+            >>> numpy_cos(x)  # calls numpy_cos_impl_cuda
 
         """
         if isinstance(device_types, str):
@@ -361,11 +366,11 @@ class CustomOp:
             >>> from torch import Tensor
             >>>
             >>> # Example 1: an operator without data-dependent output shape
-            >>> @custom_op('mylibrary::custom_linear')
-            >>> def custom_linear(x: Tensor, weight: Tensor, bias: Tensor):
+            >>> @custom_op('my_library::custom_linear')
+            >>> def custom_linear(x: Tensor, weight: Tensor, bias: Tensor) -> Tensor:
             >>>     ...
             >>>
-            >>> @custom_linear.impl_abstract():
+            >>> @custom_linear.impl_abstract()
             >>> def custom_linear_abstract(x, weight):
             >>>     assert x.dim() == 2
             >>>     assert weight.dim() == 2
@@ -377,11 +382,11 @@ class CustomOp:
             >>>     return (x @ weight.t()) + bias
             >>>
             >>> # Example 2: an operator with data-dependent output shape
-            >>> @custom_op('mylibrary::custom_nonzero')
+            >>> @custom_op('my_library::custom_nonzero')
             >>> def custom_nonzero(x: Tensor) -> Tensor:
             >>>     ...
             >>>
-            >>> @custom_nonzero.impl_abstract():
+            >>> @custom_nonzero.impl_abstract()
             >>> def custom_nonzero_abstract(x):
             >>>     # Number of nonzero-elements is data-dependent.
             >>>     # Since we cannot peek at the data in an abstract impl,
@@ -393,7 +398,7 @@ class CustomOp:
             >>>     result = x.new_empty(shape, dtype=torch.long)
             >>>     return result
             >>>
-            >>> @numpy_nonzero.impl(['cpu', 'cuda'])
+            >>> @custom_nonzero.impl(['cpu', 'cuda'])
             >>> def custom_nonzero_impl(x):
             >>>     x_np = to_numpy(x)
             >>>     res = np.stack(np.nonzero(x_np), axis=1)
@@ -406,7 +411,6 @@ class CustomOp:
         """
 
         def inner(f):
-            frame = inspect.stack()[1]
             self._check_doesnt_have_library_meta_impl()
             self._register_impl("abstract", f, stacklevel=_stacklevel)
             location = self._get_impl("abstract").location
@@ -428,7 +432,7 @@ class CustomOp:
                         f"at {location}"
                     )
 
-                with set_ctx_getter(error_on_ctx):
+                with torch._library.abstract_impl.set_ctx_getter(error_on_ctx):
                     return f(*args, **kwargs)
 
             self._lib.impl(self._opname, f_with_ctx, "Meta")
@@ -526,7 +530,7 @@ class CustomOp:
                 f"instead, the operator will decompose into its constituents and those "
                 f"can have abstract impls defined on them.")
 
-        if _C._dispatch_has_computed_kernel_for_dispatch_key(self._qualname, "Meta"):
+        if _C._dispatch_has_kernel_for_dispatch_key(self._qualname, "Meta"):
             raise RuntimeError(
                 f"impl_abstract(...): the operator {self._qualname} "
                 f"already has an DispatchKey::Meta implementation via a "
@@ -658,24 +662,12 @@ def validate_namespace(ns: str) -> None:
         )
 
 def validate_schema(schema: FunctionSchema) -> None:
-    # Coming in the future. Requires us to have correct logic for
-    # the ADInplaceOrView key
-    if schema.kind() != SchemaKind.functional:
+    if not torch._library.utils.is_functional_schema(schema):
         raise ValueError(
-            f"custom_op does not support non-functional function schema. Got: {schema}"
-        )
-
-    rets = schema.returns
-    is_non_mutating_view = len(rets) > 0 and any(
-        r.annotation is not None and not r.annotation.is_write for r in rets
-    )
-    if is_non_mutating_view:
-        raise ValueError(f"custom_op does not support view functions. Got: {schema}")
-
-    # Just seems weird so banning for now
-    if not schema.returns:
-        raise ValueError(
-            f"custom_op does not support function schema with no outputs. Got: {schema}"
+            f"custom_op only supports functional operators "
+            f"(ops that do not mutate any inputs, do not return "
+            f"views of the inputs, and has at least one return). "
+            f"Got the following non-functional schema: {schema}"
         )
 
     # For simplicity: don't allow self arguments
@@ -779,233 +771,6 @@ def validate_function_matches_schema(
     compare(kwargonly, schema.arguments.flat_kwarg_only)
 
 
-def get_none():
-    return None
-
-
-global_ctx_getter: typing.Callable = get_none
-
-
-# NOTE [ctx inside the fake implementation]
-# If a user has an operator with data-dependent output shape, then when writing
-# a fake implementation they must query the current ctx and use methods on the
-# ctx to construct a new unbacked symint.
-#
-# This is done via us setting the global_ctx_getter function every time a fake
-# implementation is invoked.
-def get_ctx() -> "AbstractImplCtx":
-    """get_ctx() returns the current AbstractImplCtx object.
-
-    Calling ``get_ctx()`` is only valid inside of an abstract implementation.
-    """
-    return global_ctx_getter()
-
-
-@contextlib.contextmanager
-def set_ctx_getter(ctx_getter):
-    global global_ctx_getter
-    prev = global_ctx_getter
-    try:
-        global_ctx_getter = ctx_getter
-        yield
-    finally:
-        global_ctx_getter = prev
-
-
-class AbstractImplCtx:
-    """
-    Context object for writing abstract implementations for custom operators.
-    """
-
-    def __init__(self, _shape_env, _op):
-        self._shape_env = _shape_env
-        self._op = _op
-
-    def create_unbacked_symint(self, *, min=2, max=None) -> torch.SymInt:
-        """Constructs a new symint (symbolic int) representing a data-dependent value.
-
-        This is useful for writing the abstract implementation (which is necessary
-        for torch.compile) for a CustomOp where an output Tensor has a size
-        that depends on the data of the input Tensors.
-
-        Args:
-            min (int): A statically known inclusive lower bound for this symint.
-                min must be at least 2 due to implementation details of
-                torch.compile. Default: 2.
-            max (Optional[int]): A statically known inclusive upper bound for this
-                symint. Default: None
-
-        .. warning:
-
-            It is important that the ``min`` and ``max`` (if not None) values are set
-            correctly, otherwise, there will be undefined behavior under
-            torch.compile. The default value of ``min`` is 2 due to torch.compile
-            specializing on 0/1 sizes.
-
-            You must also verify that your implementation on concrete Tensors
-            (e.g. CPU/CUDA) only returns Tensors where the size that corresponds
-            to the symint also has respects these constraint.
-            The easiest way to do this is to add an assertion in the CPU/CUDA/etc
-            implementation that the size follows these bounds.
-
-        Example::
-
-            >>> # an operator with data-dependent output shape
-            >>> @custom_op("mylibrary::custom_nonzero")
-            >>> def custom_nonzero(x: Tensor) -> Tensor:
-            >>>     ...
-            >>>
-            >>> @custom_nonzero.impl_abstract():
-            >>> def custom_nonzero_abstract(x):
-            >>>     # Number of nonzero-elements is data-dependent
-            >>>     ctx = torch._custom_op.get_ctx()
-            >>>     nnz = ctx.create_unbacked_symint()
-            >>>     shape = [x.dim(), nnz]
-            >>>     result = x.new_empty(shape, dtype=torch.long)
-            >>>     return result
-            >>>
-            >>> @numpy_nonzero.impl(['cpu', 'cuda'])
-            >>> def custom_nonzero_impl(x):
-            >>>     x_np = to_numpy(x)
-            >>>     res = np.stack(np.nonzero(x_np), axis=1)
-            >>>     # the size associated with ctx.create_unbacked_symint()
-            >>>     # must be constrained in the same way, so we add an assertion here.
-            >>>     if res.shape[0] < 2 or res.shape[0] > x.numel():
-            >>>         raise RuntimeError("not supported")
-            >>>     return torch.tensor(res, device=x.device)
-
-        """
-        if (
-            self._shape_env is None
-            or not self._shape_env.allow_dynamic_output_shape_ops
-        ):
-            raise torch._subclasses.fake_tensor.DynamicOutputShapeException(self._op)
-
-        if isinstance(min, torch.SymInt) or isinstance(max, torch.SymInt):
-            raise ValueError(
-                f"ctx.create_unbacked_symint(min={min}, max={max}): expected "
-                f"min and max to be statically known ints but got SymInt. "
-                f"This is not supported."
-            )
-
-        if min < 2:
-            raise ValueError(
-                f"ctx.create_unbacked_symint(min={min}, ...): expected min to be "
-                f"greater than or equal to 2. PyTorch only supports new "
-                f"data-dependent sizes of >= 2"
-            )
-
-        result = self._shape_env.create_unbacked_symint()
-        torch.fx.experimental.symbolic_shapes.constrain_range(result, min=2, max=max)
-        return result
-
-
-def infer_schema(prototype_function: typing.Callable) -> str:
-    sig = inspect.signature(prototype_function)
-
-    def error_fn(what):
-        raise ValueError(
-            f"custom_op(...)(func): {what} " f"Got func with signature {sig})"
-        )
-
-    params = [
-        parse_param(name, param, error_fn) for name, param in sig.parameters.items()
-    ]
-    ret = parse_return(sig.return_annotation, error_fn)
-    return f"({', '.join(params)}) -> {ret}"
-
-
-def parse_param(name, param, error_fn):
-    if not supported_param(param):
-        error_fn("We do not support positional-only args, varargs, or varkwargs.")
-
-    if param.annotation is inspect.Parameter.empty:
-        error_fn(f"Parameter {name} must have a type annotation.")
-
-    if param.annotation not in SUPPORTED_PARAM_TYPES.keys():
-        error_fn(
-            f"Parameter {name} has unsupported type {param.annotation}. "
-            f"The valid types are: {SUPPORTED_PARAM_TYPES.keys()}."
-        )
-
-    if param.default is not inspect.Parameter.empty:
-        error_fn(
-            f"Parameter {name} has a default value; this is not supported. "
-            f"If you want to use default values then create a function with "
-            f"default values that calls the CustomOp"
-        )
-
-    return f"{SUPPORTED_PARAM_TYPES[param.annotation]} {name}"
-
-
-def derived_types(
-    base_type, cpp_type, list_base, optional_base_list, optional_list_base
-):
-    result = [
-        (base_type, cpp_type),
-        (typing.Optional[base_type], f"{cpp_type}?"),
-    ]
-    if list_base:
-        result.append((typing.Sequence[base_type], f"{cpp_type}[]"))  # type: ignore[valid-type]
-    if optional_base_list:
-        result.append((typing.Sequence[typing.Optional[base_type]], f"{cpp_type}?[]"))  # type: ignore[valid-type]
-    if optional_list_base:
-        result.append((typing.Optional[typing.Sequence[base_type]], f"{cpp_type}[]?"))  # type: ignore[valid-type]
-    return result
-
-
-def get_supported_param_types():
-    data = [
-        # (python type, schema type, type[] variant, type?[] variant, type[]? variant
-        (torch.Tensor, "Tensor", True, True, False),
-        (int, "SymInt", True, False, True),
-        (float, "float", True, False, True),
-        (bool, "bool", True, False, True),
-        (str, "str", False, False, False),
-        (torch.types.Number, "Scalar", True, False, False),
-        (torch.dtype, "ScalarType", False, False, False),
-        (torch.device, "Device", False, False, False),
-    ]
-    result = []
-    for line in data:
-        result.extend(derived_types(*line))
-    return dict(result)
-
-
-SUPPORTED_RETURN_TYPES = {
-    torch.Tensor: "Tensor",
-    typing.List[torch.Tensor]: "Tensor[]",
-    int: "SymInt",
-    float: "float",
-    bool: "bool",
-    torch.types.Number: "Scalar",
-}
-
-
-def parse_return(annotation, error_fn):
-    origin = typing.get_origin(annotation)
-    if origin is not tuple:
-        if annotation not in SUPPORTED_RETURN_TYPES.keys():
-            error_fn(
-                f"Return has unsupported type {annotation}. "
-                f"The valid types are: {SUPPORTED_RETURN_TYPES}."
-            )
-        return SUPPORTED_RETURN_TYPES[annotation]
-
-    args = typing.get_args(annotation)
-    for arg in args:
-        if arg not in SUPPORTED_RETURN_TYPES:
-            error_fn(
-                f"Return has unsupported type {annotation}. "
-                f"The valid types are: {SUPPORTED_RETURN_TYPES}."
-            )
-
-    return "(" + ", ".join([SUPPORTED_RETURN_TYPES[arg] for arg in args]) + ")"
-
-
-SUPPORTED_PARAM_TYPES = get_supported_param_types()
-
-
 def report_error_callback(custom_op: typing.Any, key: str) -> None:
     if key == "Undefined":
         raise NotImplementedError(
@@ -1071,21 +836,32 @@ def _find_custom_op(qualname, also_check_torch_library=False):
         return global_registry[qualname]
     if not also_check_torch_library:
         raise RuntimeError(
-            f"Could not find custom op \"{qualname}\". Did you register it via "
+            f'Could not find custom op "{qualname}". Did you register it via '
             f"the torch._custom_ops API?")
     overload = get_op(qualname)
     result = custom_op_from_existing(overload)
     return result
 
 
-def _custom_op_with_schema(qualname, schema):
+def get_abstract_impl(qualname):
+    if qualname not in torch._custom_op.impl.global_registry:
+        return None
+    custom_op = torch._custom_op.impl.global_registry[qualname]
+    if custom_op is None:
+        return None
+    if not custom_op._has_impl("abstract"):
+        return None
+    return custom_op._get_impl("abstract").func
+
+
+def _custom_op_with_schema(qualname, schema, needs_fixed_stride_order=True):
     ns, name = qualname.split("::")
     schema_str = f"{name}{schema}"
     function_schema = FunctionSchema.parse(schema_str)
     validate_schema(function_schema)
-
+    tags = [torch._C.Tag.needs_fixed_stride_order] if needs_fixed_stride_order else []
     lib = library.Library(ns, "FRAGMENT")
-    lib.define(schema_str)
+    lib.define(schema_str, tags=tags)
     ophandle = find_ophandle_or_throw(ns, function_schema.name)
     result = CustomOp(lib, ns, function_schema, name, ophandle, _private_access=True)
     result._register_autograd_kernel_indirection()

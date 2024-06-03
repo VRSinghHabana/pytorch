@@ -7,8 +7,9 @@ import torch._dynamo.test_case
 import torch._dynamo.testing
 import torch._dynamo.utils
 
-from torch._dynamo.testing import same
 from torch._dynamo.utils import dynamo_timed
+
+from torch.testing._internal.common_utils import TemporaryFileName
 
 
 class DynamoProfilerTests(torch._dynamo.test_case.TestCase):
@@ -92,6 +93,21 @@ class DynamoProfilerTests(torch._dynamo.test_case.TestCase):
         with torch.profiler.profile(record_shapes=True):
             opt_fn(*inputs)
 
+    def test_execution_trace_dynamic_shapes(self):
+        def fn(x, y, z):
+            return x @ y + z
+
+        et = torch.profiler.ExecutionTraceObserver()
+        opt_fn = torch.compile(fn, dynamic=True, backend="aot_eager")
+        inputs = [torch.rand((4, 4)) for _ in range(3)]
+
+        with TemporaryFileName() as fname:
+            et.register_callback(fname)
+            et.start()
+            out = opt_fn(*inputs)
+            et.stop()
+            et.unregister_callback()
+
     def test_profiler_cache_lookup(self):
         def fn(x):
             y = x**2
@@ -119,7 +135,7 @@ class DynamoProfilerTests(torch._dynamo.test_case.TestCase):
                 )
             )
 
-            self.assertTrue(same(ref, res))
+            self.assertEqual(ref, res)
             self.assertTrue(
                 len(events) == 1,
                 "Expected one lookup profiler event for one opt_fn run",
@@ -148,6 +164,22 @@ class DynamoProfilerTests(torch._dynamo.test_case.TestCase):
         self.assertTrue(
             any(e.name == "TorchDynamo Cache Lookup" for e in prof.events())
         )
+
+    def test_profiler_dynamo_compiled_region(self):
+        def fn(x, y, z):
+            return x @ y + z
+
+        opt_fn = torch._dynamo.optimize("eager")(fn)
+
+        inputs = [torch.rand(4, 4) for _ in range(3)]
+
+        for _ in range(2):
+            opt_fn(*inputs)
+
+        with torch.profiler.profile() as prof:
+            opt_fn(*inputs)
+
+        self.assertTrue(any(e.name == "Torch-Compiled Region" for e in prof.events()))
 
 
 if __name__ == "__main__":

@@ -731,25 +731,25 @@ void initTensorExprBindings(PyObject* module) {
       }))
       .def(
           "as_buf",
-          [](const ArgValue& self) { return c10::get<BufHandle>(self); })
+          [](const ArgValue& self) { return std::get<BufHandle>(self); })
       .def(
           "as_var",
-          [](const ArgValue& self) { return c10::get<VarHandle>(self); })
+          [](const ArgValue& self) { return std::get<VarHandle>(self); })
       .def(
           "as_float",
-          [](const ArgValue& self) { return c10::get<double>(self); })
+          [](const ArgValue& self) { return std::get<double>(self); })
       .def(
           "as_int",
-          [](const ArgValue& self) { return c10::get<int64_t>(self); })
-      .def("as_bool", [](const ArgValue& self) { return c10::get<bool>(self); })
+          [](const ArgValue& self) { return std::get<int64_t>(self); })
+      .def("as_bool", [](const ArgValue& self) { return std::get<bool>(self); })
       .def(
           "as_none",
-          [](const ArgValue& self) { return c10::get<ArgNone>(self); })
+          [](const ArgValue& self) { return std::get<ArgNone>(self); })
       .def(
           "as_buflist",
-          [](const ArgValue& self) { return c10::get<BufList>(self); })
+          [](const ArgValue& self) { return std::get<BufList>(self); })
       .def("as_intlist", [](const ArgValue& self) {
-        return c10::get<IntList>(self);
+        return std::get<IntList>(self);
       });
 
   py::class_<c10::ScalarType>(te, "ScalarType");
@@ -936,13 +936,13 @@ void initTensorExprBindings(PyObject* module) {
       &tensorexpr::replaceListOutputWithTuple);
   te.def("trim_graph", &tensorexpr::trimGraph);
 #ifdef TORCH_ENABLE_LLVM
-  te.def("set_llvm_target_triple", [](const c10::optional<std::string>& val) {
+  te.def("set_llvm_target_triple", [](const std::optional<std::string>& val) {
     tensorexpr::LLVMTargetTriple() = val;
   });
-  te.def("set_llvm_target_cpu", [](const c10::optional<std::string>& val) {
+  te.def("set_llvm_target_cpu", [](const std::optional<std::string>& val) {
     tensorexpr::LLVMTargetCPU() = val;
   });
-  te.def("set_llvm_target_attrs", [](const c10::optional<std::string>& val) {
+  te.def("set_llvm_target_attrs", [](const std::optional<std::string>& val) {
     tensorexpr::LLVMTargetAttrs() = val;
   });
   te.def("set_llvm_aot_workflow", [](bool val) {

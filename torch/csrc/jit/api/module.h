@@ -11,7 +11,6 @@
 #include <torch/csrc/Export.h>
 #include <torch/csrc/api/include/torch/ordered_dict.h>
 #include <torch/csrc/jit/api/compilation_unit.h>
-#include <torch/csrc/utils/memory.h>
 
 #include <ATen/core/function_schema.h>
 #include <ATen/core/qualified_name.h>
@@ -33,8 +32,7 @@
 // modules and their methods into flattened graphs which don't have any
 // function calls.
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 using ::c10::Argument;
 using ::c10::FunctionSchema;
@@ -92,6 +90,8 @@ struct TORCH_API Module : public Object {
   Module() = default;
   Module(const Module&) = default;
   Module& operator=(const Module&) = default;
+  Module(Module&&) noexcept = default;
+  Module& operator=(Module&&) noexcept = default;
   Module(
       c10::QualifiedName,
       std::shared_ptr<CompilationUnit> cu,
@@ -123,6 +123,7 @@ struct TORCH_API Module : public Object {
   void register_buffer(const std::string& name, at::Tensor v) {
     bool is_param = false;
     bool is_buffer = true;
+    std::lock_guard<std::mutex> lock(*register_mutex_);
     type()->addOrCheckAttribute(name, TensorType::get(), is_param, is_buffer);
     _ivalue()->setAttr(name, std::move(v));
   }
@@ -131,6 +132,7 @@ struct TORCH_API Module : public Object {
       const std::string& name,
       at::Tensor v,
       bool is_buffer) {
+    std::lock_guard<std::mutex> lock(*register_mutex_);
     type()->addOrCheckAttribute(name, TensorType::get(), !is_buffer, is_buffer);
     _ivalue()->setAttr(name, std::move(v));
   }
@@ -236,7 +238,7 @@ struct TORCH_API Module : public Object {
 
   Module copy() const;
 
-  Module deepcopy(c10::optional<at::Device> device = c10::nullopt) const;
+  Module deepcopy(std::optional<at::Device> device = c10::nullopt) const;
 
   // Clones both the underlying `ClassType` and the module instance(data), this
   // function creates a new `ClassType` and returns a new instance that has the
@@ -299,7 +301,7 @@ struct TORCH_API Module : public Object {
   Module clone_impl(
       std::unordered_map<TypePtr, TypePtr>& type_remap,
       bool inplace,
-      IValue::HashAliasedIValueMap memo,
+      IValue::HashIdentityIValueMap memo,
       const std::unordered_set<std::string>& ignored_methods,
       const std::unordered_set<std::string>& ignored_attributes) const;
 
@@ -313,8 +315,8 @@ struct TORCH_API Module : public Object {
   }
 
   void to_impl(
-      const c10::optional<at::Device>& device,
-      const c10::optional<at::ScalarType>& dtype,
+      const std::optional<at::Device>& device,
+      const std::optional<at::ScalarType>& dtype,
       bool non_blocking);
 
   // Extra handle for the module to delete when itself is deleted
@@ -322,13 +324,16 @@ struct TORCH_API Module : public Object {
 
   // Map of function names to the traced inputs that they have been traced with
   c10::Dict<std::string, c10::impl::GenericList> traced_inputs_;
+
+  // Mutex to keep registring buffer or parameter thread safe.
+  std::shared_ptr<std::mutex> register_mutex_ = std::make_shared<std::mutex>();
 };
 
 // C++ equivalent api of `torch.jit.freeze`. See documentation there for
 // details.
 TORCH_API Module freeze(
     const Module& module,
-    const c10::optional<std::vector<std::string>>& preserved_attrs =
+    const std::optional<std::vector<std::string>>& preserved_attrs =
         c10::nullopt,
     bool optimize_numerics = true);
 
@@ -536,9 +541,7 @@ struct slot_list_impl {
   size_t size() const {
     if (!size_) {
       size_ = size_t(0);
-      // NOLINTNEXTLINE(clang-diagnostic-unused-variable)
-      for (const value_type& s : *(this)) {
-        (void)s; // Suppress unused variable warning
+      for ([[maybe_unused]] const value_type& _ : *(this)) {
         ++*size_;
       }
     }
@@ -561,7 +564,7 @@ struct slot_list_impl {
   bool return_module_;
   // size of this list, cached on first request
   // when we need to filter the slot list
-  mutable c10::optional<size_t> size_;
+  mutable std::optional<size_t> size_;
   friend struct Module;
 };
 
@@ -677,5 +680,4 @@ using Module = ::torch::jit::Module;
 using ExtraFilesMap = ::torch::jit::ExtraFilesMap;
 } // namespace script
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

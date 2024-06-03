@@ -1,4 +1,3 @@
-#include <c10/util/variant.h>
 #include <torch/csrc/jit/tensorexpr/kernel.h>
 
 #include <ATen/ExpandUtils.h>
@@ -129,9 +128,9 @@ bool& getOptConditionals() {
   return opt_conditionals;
 }
 
-c10::optional<at::Device> pickDeviceType(
+std::optional<at::Device> pickDeviceType(
     const at::ArrayRef<torch::jit::Value*>& inputs) {
-  c10::optional<at::Device> device = c10::nullopt;
+  std::optional<at::Device> device = c10::nullopt;
   for (auto const& input : inputs) {
     auto tt = input->type()->cast<TensorType>();
     if (tt && tt->device()) {
@@ -144,9 +143,9 @@ c10::optional<at::Device> pickDeviceType(
   return device;
 }
 
-static c10::optional<at::Device> pickDeviceType(
+static std::optional<at::Device> pickDeviceType(
     const std::shared_ptr<Graph>& graph) {
-  c10::optional<at::Device> device = c10::nullopt;
+  std::optional<at::Device> device = c10::nullopt;
   for (auto const& node : graph->nodes()) {
     for (auto const& input : node->inputs()) {
       if (auto tt = input->type()->cast<TensorType>()) {
@@ -180,7 +179,7 @@ static c10::optional<at::Device> pickDeviceType(
 
 // If v is a Tensor with concretely-known sizes and dtype, return them, else
 // nullopt.
-static c10::optional<TensorInfo> getTensorInfoJit(torch::jit::Value* v) {
+static std::optional<TensorInfo> getTensorInfoJit(torch::jit::Value* v) {
   auto const& it = v->type()->cast<TensorType>();
 
   c10::ScalarType dtype = c10::ScalarType::Float;
@@ -437,9 +436,9 @@ ArgValue TensorExprKernel::toArg(const torch::jit::Value* v) const {
     }
     if (vec.empty()) {
       return BufList(); // Return arbitrarily typed vector
-    } else if (c10::get_if<BufHandle>(&vec[0])) {
+    } else if (std::get_if<BufHandle>(&vec[0])) {
       return convertVecArgValue<BufHandle>(vec);
-    } else if (c10::get_if<int64_t>(&vec[0])) {
+    } else if (std::get_if<int64_t>(&vec[0])) {
       return convertVecArgValue<int64_t>(vec);
     }
     throw unsupported_dtype();
@@ -528,7 +527,7 @@ std::vector<ExprHandle> TensorExprKernel::sizesForValue(
   throw malformed_input(msg);
 }
 
-static c10::optional<ScalarType> findDtypeForValue(const torch::jit::Value* v) {
+static std::optional<ScalarType> findDtypeForValue(const torch::jit::Value* v) {
   if (v->type()->kind() == TypeKind::TensorType) {
     auto tt = v->type()->cast<TensorType>();
     if (tt->scalarType()) {
@@ -608,7 +607,7 @@ Tensor TensorExprKernel::computeValue(const torch::jit::Value* v) {
       argInputs.emplace_back(toArg(inp));
     }
     // handle optional bias
-    if (c10::get_if<ArgNone>(&argInputs[2])) {
+    if (std::get_if<ArgNone>(&argInputs[2])) {
       Dtype dtype = outputType ? Dtype(*outputType) : kFloat;
       std::vector<ExprHandle> biasShape;
       biasShape.push_back(outputShape[1]);
@@ -708,7 +707,7 @@ static void fuseAllLoops(StmtPtr st) {
 }
 
 // Compute the trip count of a loop if it is a constant.
-static c10::optional<int64_t> tripCount(ForPtr loop) {
+static std::optional<int64_t> tripCount(ForPtr loop) {
   auto tc = IRSimplifier::simplify(
       cast<int64_t>(ExprHandle(loop->stop()) - ExprHandle(loop->start())));
   if (auto val = to<LongImm>(tc.node())) {
@@ -959,7 +958,7 @@ std::string TensorExprKernel::getCodeGenName(BackendType backendType) {
 }
 
 template <typename T>
-static bool isValidPrimProperty(const c10::optional<T>& a, T b) {
+static bool isValidPrimProperty(const std::optional<T>& a, T b) {
   return !a.has_value() || *a == b;
 }
 

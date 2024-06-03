@@ -7,6 +7,7 @@
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 import pytest
+
 import torch
 import torch.cuda
 
@@ -137,8 +138,8 @@ def test_scatter_multiple_tensors():
 
     a, b = scatter(*ab, chunks=2)
 
-    assert list(a)[0].size() == (1, 1)
-    assert list(b)[0].size() == (1, 1)
+    assert next(iter(a)).size() == (1, 1)
+    assert next(iter(b)).size() == (1, 1)
     assert list(a)[1].size() == (2, 2)
     assert list(b)[1].size() == (2, 2)
 

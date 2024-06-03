@@ -22,20 +22,20 @@ struct StashTorchDispatchModeGuard {
   ~StashTorchDispatchModeGuard() {
     if (saved_mode_key_ != c10::nullopt) {
       c10::impl::TorchDispatchModeTLS::set_mode(
-          std::move(saved_mode_), saved_mode_key_.value());
+          saved_mode_, saved_mode_key_.value());
     } else {
       c10::impl::TorchDispatchModeTLS::push_non_infra_mode_onto_stack(
           std::move(saved_mode_));
     }
   }
 
-  const std::shared_ptr<c10::SafePyObject>& get_cur_mode() {
+  const std::shared_ptr<c10::impl::PyObject_TorchDispatchMode>& get_cur_mode() {
     return saved_mode_;
   }
 
  private:
-  std::shared_ptr<at::SafePyObject> saved_mode_;
-  c10::optional<c10::impl::TorchDispatchModeKey> saved_mode_key_;
+  std::shared_ptr<c10::impl::PyObject_TorchDispatchMode> saved_mode_;
+  std::optional<c10::impl::TorchDispatchModeKey> saved_mode_key_;
 };
 
 struct StashTorchDispatchStackGuard {

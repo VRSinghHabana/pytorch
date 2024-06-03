@@ -7,12 +7,21 @@ import torch.distributed._tensor.ops
 import torch.distributed._tensor.random as random
 from torch.distributed._tensor._utils import compute_local_shape
 from torch.distributed._tensor.api import distribute_module, distribute_tensor, DTensor
-from torch.distributed._tensor.device_mesh import (
-    DeviceMesh,
-    init_device_mesh,
-    mesh_resources,
+from torch.distributed._tensor.ops.utils import normalize_to_torch_size
+from torch.distributed._tensor.placement_types import (
+    Partial,
+    Placement,
+    Replicate,
+    Shard,
 )
-from torch.distributed._tensor.placement_types import Placement, Replicate, Shard
+from torch.distributed.device_mesh import _mesh_resources, DeviceMesh, init_device_mesh
+from torch.optim.optimizer import (
+    _foreach_supported_types as _optim_foreach_supported_types,
+)
+from torch.utils._foreach_utils import (
+    _foreach_supported_types as _util_foreach_supported_types,
+)
+
 
 # All public APIs from dtensor package
 __all__ = [
@@ -23,7 +32,17 @@ __all__ = [
     "init_device_mesh,",
     "Shard",
     "Replicate",
+    "Partial",
 ]
+
+
+# Append DTensor to the list of supported types for foreach implementation for optimizer
+# and clip_grad_norm_ so that we will try to use foreach over the for-loop implementation on CUDA.
+if DTensor not in _optim_foreach_supported_types:
+    _optim_foreach_supported_types.append(DTensor)
+
+if DTensor not in _util_foreach_supported_types:
+    _util_foreach_supported_types.append(DTensor)
 
 
 def _dtensor_init_helper(
@@ -34,7 +53,7 @@ def _dtensor_init_helper(
     **kwargs,
 ) -> DTensor:
     # if device_mesh is None, use the one from mesh resources
-    device_mesh = device_mesh or mesh_resources.get_current_mesh()
+    device_mesh = device_mesh or _mesh_resources.get_current_mesh()
     kwargs["device"] = device_mesh.device_type
 
     # set default placements to replicated if not specified
@@ -51,20 +70,16 @@ def _dtensor_init_helper(
     # get local tensor shape
     local_shape = compute_local_shape(size, device_mesh, placements)
     # initialize the local tensor
-    if len(local_shape) == 0:
-        local_tensor = torch.empty(0, **kwargs)
-    elif init_op == torch.full:
+    if init_op == torch.full:
         fill_value = kwargs.pop("fill_value", 0)
         local_tensor = init_op(local_shape, fill_value, **kwargs)
     elif init_op == torch.rand or init_op == torch.randn:
         # this tensor meta is not used except `shape`
         dtype = kwargs.get("dtype", torch.get_default_dtype())
-        requires_grad = kwargs.get("requires_grad", False)
 
-        from torch.distributed._tensor.placement_types import DTensorSpec
-        from torch.fx.passes.shape_prop import TensorMetadata
+        from torch.distributed._tensor.placement_types import DTensorSpec, TensorMeta
 
-        tensor_meta = TensorMetadata(size, dtype, requires_grad, (0,), None, False, {})
+        tensor_meta = TensorMeta(size, (0,), dtype)
         spec = DTensorSpec(device_mesh, placements, tensor_meta=tensor_meta)
 
         if random.is_rng_supported_mesh(device_mesh) and not random._rng_tracker:
@@ -87,16 +102,6 @@ def _dtensor_init_helper(
     )
 
 
-def _normalize_to_torch_size(size) -> torch.Size:
-    # convert Union[Tuple[int], Tuple[Sequence[int]]] to torch.Size
-    # normalize the size argument
-    if len(size) == 1 and isinstance(size[0], Sequence):
-        torch_size = size[0]
-    else:
-        torch_size = list(size)
-    return torch.Size(torch_size)
-
-
 def ones(
     *size,
     dtype: Optional[torch.dtype] = None,
@@ -116,7 +121,7 @@ def ones(
 
     Keyword args:
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).
         layout (:class:`torch.layout`, optional): the desired layout of returned DTensor.
             Default: ``torch.strided``.
         requires_grad (bool, optional): If autograd should record operations on the
@@ -127,7 +132,7 @@ def ones(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.ones,
@@ -159,7 +164,7 @@ def empty(
 
     Keyword args:
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).\
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).\
         layout (:class:`torch.layout`, optional): the desired layout of returned :class:`DTensor`.
             Default: ``torch.strided``.
         requires_grad (bool, optional): If autograd should record operations on the
@@ -170,7 +175,7 @@ def empty(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.empty,
@@ -205,7 +210,7 @@ def full(
 
     Keyword args:
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).
         layout (:class:`torch.layout`, optional): the desired layout of returned DTensor.
             Default: ``torch.strided``.
         requires_grad (bool, optional): If autograd should record operations on the
@@ -216,7 +221,7 @@ def full(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.full,
@@ -250,7 +255,7 @@ def rand(
 
     Keyword args:
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).
         layout (:class:`torch.layout`, optional): the desired layout of returned DTensor.
             Default: ``torch.strided``.
         requires_grad (bool, optional): If autograd should record operations on the
@@ -261,7 +266,7 @@ def rand(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.rand,
@@ -294,7 +299,7 @@ def randn(
 
     Keyword args:
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).
         layout (:class:`torch.layout`, optional): the desired layout of returned DTensor.
             Default: ``torch.strided``.
         requires_grad (bool, optional): If autograd should record operations on the
@@ -305,7 +310,7 @@ def randn(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.randn,
@@ -337,7 +342,7 @@ def zeros(
         requires_grad (bool, optional): If autograd should record operations on the
             returned :class:`DTensor`. Default: ``False``.
         dtype (:class:`torch.dtype`, optional): the desired data type of returned :class:`DTensor`.
-            Default: if ``None``, uses a global default (see :func:`torch.set_default_tensor_type`).
+            Default: if ``None``, uses a global default (see :func:`torch.set_default_dtype`).
         layout (:class:`torch.layout`, optional): the desired layout of returned :class:`DTensor`.
             Default: ``torch.strided``.
         device_mesh: :class:`DeviceMesh` type, contains the mesh info of ranks
@@ -346,7 +351,7 @@ def zeros(
     Returns:
         A :class:`DTensor` object on each rank
     """
-    torch_size = _normalize_to_torch_size(size)
+    torch_size = normalize_to_torch_size(size)
 
     return _dtensor_init_helper(
         torch.zeros,
@@ -357,7 +362,3 @@ def zeros(
         device_mesh=device_mesh,
         placements=placements,
     )
-
-
-if not torch._running_with_deploy():
-    import torch.distributed._tensor._dynamo_utils
